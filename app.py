@@ -25,6 +25,8 @@ if 'history' not in st.session_state:
     st.session_state.history = []
 if 'processed_files' not in st.session_state:
     st.session_state.processed_files = {}
+if 'order_list' not in st.session_state:
+    st.session_state.order_list = [] # Pour suivre l'ordre d'arrivée
 
 # --- DESIGN CSS ---
 st.markdown("""
@@ -35,6 +37,12 @@ st.markdown("""
     .label-custom { color: #666; font-size: 0.9em; font-weight: bold; margin-bottom: 5px; }
     .value-custom { font-size: 1.6em; font-weight: 800; color: #1A1A1A; }
     .diag-box { text-align:center; padding:10px; border-radius:10px; border:1px solid #EEE; background: white; }
+    /* Style pour agrandir la zone d'upload */
+    .stFileUploader {
+        border: 2px dashed #6366F1;
+        padding: 10px;
+        border-radius: 15px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -116,7 +124,6 @@ def analyze_segment(y, sr):
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, tuning=tuning, bins_per_octave=24)
     chroma_avg = np.mean(chroma, axis=1)
     
-    # PROFILES ENRICHIS (V5) : Intègre les harmoniques complexes (7th, 9th)
     PROFILES = {
         "major": [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88], 
         "minor": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17], 
@@ -129,23 +136,18 @@ def analyze_segment(y, sr):
         for i in range(12):
             score = np.corrcoef(chroma_avg, np.roll(profile, i))[0, 1]
             actual_rolled = np.roll(chroma_avg, -i)
-            # Pénalité si la tierce est absente
             if mode == "major" and actual_rolled[4] < actual_rolled[3]: score -= 0.05
             if mode == "minor" and actual_rolled[3] < actual_rolled[4]: score -= 0.05
-            
             if score > best_score: 
                 best_score, res_key = score, f"{NOTES[i]} {mode}"
     
-    # Mapping des accords complexes vers le Majeur pour Camelot Compatibility
     if "complex" in res_key: res_key = res_key.replace("complex", "major")
-    
     return res_key, best_score, chroma_avg
 
 @st.cache_data(show_spinner="Analyse Ultra V5...")
 def get_full_analysis(file_buffer):
     file_buffer.seek(0)
     y, sr = librosa.load(file_buffer)
-    
     is_aligned = check_drum_alignment(y, sr)
     y_final, filter_applied = (y, False) if is_aligned else (librosa.effects.hpss(y)[0], True)
     
@@ -189,14 +191,16 @@ def get_full_analysis(file_buffer):
 
 # --- INTERFACE ---
 st.markdown("<h1 style='text-align: center;'>🎧 RICARDO_DJ228 | V5 ULTRA PRO</h1>", unsafe_allow_html=True)
+
+# Zone d'upload globale (placée en haut pour être accessible partout)
+uploaded_files = st.file_uploader("📂 DÉPOSEZ VOS TRACKS ICI (OU CLIQUEZ)", type=['mp3', 'wav', 'flac'], accept_multiple_files=True)
+
 tabs = st.tabs(["📁 ANALYSEUR", "🕒 HISTORIQUE"])
 
 with tabs[0]:
-    files = st.file_uploader("Importer des tracks", type=['mp3', 'wav', 'flac'], accept_multiple_files=True)
-    
-    if files:
+    if uploaded_files:
         files_to_process = []
-        for f in files:
+        for f in uploaded_files:
             file_id = f"{f.name}_{f.size}"
             if file_id not in st.session_state.processed_files:
                 files_to_process.append(f)
@@ -208,52 +212,55 @@ with tabs[0]:
                     for r in new_results:
                         fid = f"{r['file_name']}_{r['original_buffer'].size}"
                         st.session_state.processed_files[fid] = r
+                        # On ajoute l'ID au début de la liste pour l'affichage inverse
+                        if fid not in st.session_state.order_list:
+                            st.session_state.order_list.insert(0, fid)
 
-        for f in files:
-            fid = f"{f.name}_{f.size}"
-            if fid in st.session_state.processed_files:
-                res = st.session_state.processed_files[fid]
-                file_name = res['file_name']
-                file_buffer = res['original_buffer']
+        # Affichage selon l'ordre inverse (nouveaux en haut)
+        for fid in st.session_state.order_list:
+            # Vérifier si le fichier est toujours dans l'upload actuel (optionnel selon ton besoin)
+            res = st.session_state.processed_files[fid]
+            file_name = res['file_name']
+            file_buffer = res['original_buffer']
+            
+            with st.expander(f"🎵 {file_name}", expanded=True):
+                cam_final = get_camelot_pro(res['synthese'])
+                entry = {"Date": datetime.now().strftime("%d/%m %H:%M"), "Fichier": file_name, "Note": res['synthese'], "Camelot": cam_final, "BPM": res['tempo']}
+                if not any(h['Fichier'] == file_name for h in st.session_state.history): 
+                    st.session_state.history.insert(0, entry)
+
+                st.audio(file_buffer) 
+                c1, c2, c3, c4 = st.columns(4)
+                with c1: 
+                    st.markdown(f'<div class="metric-container"><div class="label-custom">DOMINANTE</div><div class="value-custom">{res["vote"]}</div><div>{get_camelot_pro(res["vote"])}</div></div>', unsafe_allow_html=True)
+                    get_sine_witness(res["vote"], f"dom_{fid}")
+                with c2: 
+                    st.markdown(f'<div class="metric-container" style="border-bottom: 4px solid #6366F1;"><div class="label-custom">SYNTHÈSE</div><div class="value-custom">{res["synthese"]}</div><div>{cam_final}</div></div>', unsafe_allow_html=True)
+                    get_sine_witness(res["synthese"], f"synth_{fid}")
+                    st.download_button(label="💾 MP3 TAGGÉ", data=get_tagged_audio(file_buffer, cam_final), file_name=f"[{cam_final}] {file_name}", mime="audio/mpeg", key=f"dl_{fid}")
                 
-                with st.expander(f"🎵 {file_name}", expanded=True):
-                    cam_final = get_camelot_pro(res['synthese'])
-                    entry = {"Date": datetime.now().strftime("%d/%m %H:%M"), "Fichier": file_name, "Note": res['synthese'], "Camelot": cam_final, "BPM": res['tempo']}
-                    if not any(h['Fichier'] == file_name for h in st.session_state.history): 
-                        st.session_state.history.insert(0, entry)
+                df_tl = pd.DataFrame(res['timeline'])
+                df_s = df_tl.sort_values(by="Confiance", ascending=False).reset_index()
+                b_n = df_s.loc[0, 'Note']
+                s_n = df_s[df_s['Note'] != b_n].iloc[0]['Note'] if not df_s[df_s['Note'] != b_n].empty else b_n
+                
+                with c3:
+                    st.markdown(f'<div class="metric-container" style="border-bottom: 4px solid #F1C40F;"><div class="label-custom">TOP CONFIANCE</div><div style="font-size:0.85em; margin-top:5px;">🥇 {b_n} <b>({get_camelot_pro(b_n)})</b></div><div style="font-size:0.85em;">🥈 {s_n} <b>({get_camelot_pro(s_n)})</b></div></div>', unsafe_allow_html=True)
+                    ct1, ct2 = st.columns(2)
+                    with ct1: get_sine_witness(b_n, f"b_{fid}")
+                    with ct2: get_sine_witness(s_n, f"s_{fid}")
+                
+                with c4: st.markdown(f'<div class="metric-container"><div class="label-custom">BPM & ENERGIE</div><div class="value-custom">{res["tempo"]}</div><div>E: {res["energy"]}/10</div></div>', unsafe_allow_html=True)
 
-                    st.audio(file_buffer) 
-                    c1, c2, c3, c4 = st.columns(4)
-                    with c1: 
-                        st.markdown(f'<div class="metric-container"><div class="label-custom">DOMINANTE</div><div class="value-custom">{res["vote"]}</div><div>{get_camelot_pro(res["vote"])}</div></div>', unsafe_allow_html=True)
-                        get_sine_witness(res["vote"], f"dom_{fid}")
-                    with c2: 
-                        st.markdown(f'<div class="metric-container" style="border-bottom: 4px solid #6366F1;"><div class="label-custom">SYNTHÈSE</div><div class="value-custom">{res["synthese"]}</div><div>{cam_final}</div></div>', unsafe_allow_html=True)
-                        get_sine_witness(res["synthese"], f"synth_{fid}")
-                        st.download_button(label="💾 MP3 TAGGÉ", data=get_tagged_audio(file_buffer, cam_final), file_name=f"[{cam_final}] {file_name}", mime="audio/mpeg", key=f"dl_{fid}")
-                    
-                    df_tl = pd.DataFrame(res['timeline'])
-                    df_s = df_tl.sort_values(by="Confiance", ascending=False).reset_index()
-                    b_n = df_s.loc[0, 'Note']
-                    s_n = df_s[df_s['Note'] != b_n].iloc[0]['Note'] if not df_s[df_s['Note'] != b_n].empty else b_n
-                    
-                    with c3:
-                        st.markdown(f'<div class="metric-container" style="border-bottom: 4px solid #F1C40F;"><div class="label-custom">TOP CONFIANCE</div><div style="font-size:0.85em; margin-top:5px;">🥇 {b_n} <b>({get_camelot_pro(b_n)})</b></div><div style="font-size:0.85em;">🥈 {s_n} <b>({get_camelot_pro(s_n)})</b></div></div>', unsafe_allow_html=True)
-                        ct1, ct2 = st.columns(2)
-                        with ct1: get_sine_witness(b_n, f"b_{fid}")
-                        with ct2: get_sine_witness(s_n, f"s_{fid}")
-                    
-                    with c4: st.markdown(f'<div class="metric-container"><div class="label-custom">BPM & ENERGIE</div><div class="value-custom">{res["tempo"]}</div><div>E: {res["energy"]}/10</div></div>', unsafe_allow_html=True)
+                st.markdown("---")
+                d1, d2, d3 = st.columns([1, 1, 2])
+                with d1: st.markdown(f"<div class='diag-box'><div class='label-custom'>PURETÉ</div><div style='color:{'#2ECC71' if res['purity'] > 75 else '#F1C40F'}; font-weight:bold;'>{res['purity']}%</div></div>", unsafe_allow_html=True)
+                with d2: st.markdown(f"<div class='diag-box'><div class='label-custom'>MÉTHODE</div><div style='color:#6366F1; font-weight:bold;'>{'✨ HPSS' if res['is_filtered'] else '🎸 DIRECT'}</div></div>", unsafe_allow_html=True)
+                with d3:
+                    if res['key_shift']: st.warning(f"Changement détecté : {res['secondary']}")
+                    else: st.success("Structure harmonique parfaite.")
 
-                    st.markdown("---")
-                    d1, d2, d3 = st.columns([1, 1, 2])
-                    with d1: st.markdown(f"<div class='diag-box'><div class='label-custom'>PURETÉ</div><div style='color:{'#2ECC71' if res['purity'] > 75 else '#F1C40F'}; font-weight:bold;'>{res['purity']}%</div></div>", unsafe_allow_html=True)
-                    with d2: st.markdown(f"<div class='diag-box'><div class='label-custom'>MÉTHODE</div><div style='color:#6366F1; font-weight:bold;'>{'✨ HPSS' if res['is_filtered'] else '🎸 DIRECT'}</div></div>", unsafe_allow_html=True)
-                    with d3:
-                        if res['key_shift']: st.warning(f"Changement détecté : {res['secondary']}")
-                        else: st.success("Structure harmonique parfaite.")
-
-                    st.plotly_chart(px.scatter(df_tl, x="Temps", y="Note", color="Confiance", size="Confiance", template="plotly_white"), use_container_width=True)
+                st.plotly_chart(px.scatter(df_tl, x="Temps", y="Note", color="Confiance", size="Confiance", template="plotly_white"), use_container_width=True)
 
 with tabs[1]:
     if st.session_state.history:
