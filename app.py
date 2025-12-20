@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import datetime
 import io
 import streamlit.components.v1 as components
+from concurrent.futures import ThreadPoolExecutor
 
 # --- IMPORT POUR LES TAGS MP3 (MUTAGEN) ---
 try:
@@ -104,7 +105,6 @@ def check_drum_alignment(y, sr):
     flatness = np.mean(librosa.feature.spectral_flatness(y=y))
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
     chroma_max_mean = np.mean(np.max(chroma, axis=0))
-    # Si Flatness faible et Chroma fort = Batteries probablement accordées ou mélodie ultra dominante
     return flatness < 0.045 or chroma_max_mean > 0.75
 
 def analyze_segment(y, sr):
@@ -133,16 +133,15 @@ def analyze_segment(y, sr):
 
 @st.cache_data(show_spinner="Analyse intelligente Ultra V4.9...")
 def get_full_analysis(file_buffer):
+    # .seek(0) important pour le multi-threading si le buffer est partagé
+    file_buffer.seek(0)
     y, sr = librosa.load(file_buffer)
     
-    # --- LOGIQUE DE FILTRAGE CONDITIONNEL ---
     is_aligned = check_drum_alignment(y, sr)
     if is_aligned:
-        # Les batteries sont accordées ou la mélodie est propre : On garde tout
         y_final = y 
         filter_applied = False
     else:
-        # Les batteries sont trop "bruitées" ou désaccordées : On isole l'harmonique
         y_final, _ = librosa.effects.hpss(y)
         filter_applied = True
     
@@ -178,10 +177,12 @@ def get_full_analysis(file_buffer):
     energy = int(np.clip(np.mean(librosa.feature.rms(y=y))*35 + (float(tempo)/160), 1, 10))
 
     return {
+        "file_name": getattr(file_buffer, 'name', 'Unknown'),
         "vote": dominante_vote, "synthese": tonique_synth, "confidence": final_conf, "tempo": int(float(tempo)), 
         "energy": energy, "timeline": timeline_data, "purity": purity, 
         "key_shift": key_shift_detected, "secondary": top_votes[1][0] if len(top_votes)>1 else top_votes[0][0],
-        "is_filtered": filter_applied
+        "is_filtered": filter_applied,
+        "original_buffer": file_buffer
     }
 
 # --- INTERFACE ---
@@ -190,33 +191,43 @@ tabs = st.tabs(["📁 ANALYSEUR", "🕒 HISTORIQUE"])
 
 with tabs[0]:
     files = st.file_uploader("Importer des tracks", type=['mp3', 'wav', 'flac'], accept_multiple_files=True)
+    
     if files:
-        for file in files:
-            with st.expander(f"🎵 {file.name}", expanded=True):
-                res = get_full_analysis(file)
+        # --- BLOC MULTI-THREADING ---
+        # On utilise un maximum de 4 threads pour ne pas surcharger la RAM
+        with st.spinner(f"Analyse parallèle de {len(files)} fichiers en cours..."):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(get_full_analysis, files))
+
+        # Affichage des résultats
+        for res in results:
+            file_name = res['file_name']
+            file_buffer = res['original_buffer']
+            
+            with st.expander(f"🎵 {file_name}", expanded=True):
                 cam_final = get_camelot_pro(res['synthese'])
                 
                 # Historique
-                entry = {"Date": datetime.now().strftime("%d/%m %H:%M"), "Fichier": file.name, "Note": res['synthese'], "Camelot": cam_final, "BPM": res['tempo']}
-                if not any(h['Fichier'] == file.name for h in st.session_state.history): st.session_state.history.insert(0, entry)
+                entry = {"Date": datetime.now().strftime("%d/%m %H:%M"), "Fichier": file_name, "Note": res['synthese'], "Camelot": cam_final, "BPM": res['tempo']}
+                if not any(h['Fichier'] == file_name for h in st.session_state.history): 
+                    st.session_state.history.insert(0, entry)
 
-                st.audio(file) 
+                st.audio(file_buffer) 
                 c1, c2, c3, c4 = st.columns(4)
                 with c1: 
                     st.markdown(f'<div class="metric-container"><div class="label-custom">DOMINANTE</div><div class="value-custom">{res["vote"]}</div><div>{get_camelot_pro(res["vote"])}</div></div>', unsafe_allow_html=True)
-                    get_sine_witness(res["vote"], "dom")
+                    get_sine_witness(res["vote"], f"dom_{file_name}")
                 with c2: 
                     st.markdown(f'<div class="metric-container" style="border-bottom: 4px solid #6366F1;"><div class="label-custom">SYNTHÈSE</div><div class="value-custom">{res["synthese"]}</div><div>{cam_final}</div></div>', unsafe_allow_html=True)
-                    get_sine_witness(res["synthese"], "synth")
+                    get_sine_witness(res["synthese"], f"synth_{file_name}")
                     st.download_button(
                         label="💾 EXPORT TAGGED MP3", 
-                        data=get_tagged_audio(file, cam_final), 
-                        file_name=f"[{cam_final}] {file.name}", 
+                        data=get_tagged_audio(file_buffer, cam_final), 
+                        file_name=f"[{cam_final}] {file_name}", 
                         mime="audio/mpeg",
-                        key=f"dl_btn_{file.name}"
+                        key=f"dl_btn_{file_name}"
                     )
                 
-                # --- PODIUM TOP CONFIANCE ---
                 df_timeline = pd.DataFrame(res['timeline'])
                 df_s = df_timeline.sort_values(by="Confiance", ascending=False).reset_index()
                 best_n = df_s.loc[0, 'Note']
@@ -225,13 +236,12 @@ with tabs[0]:
                 with c3:
                     st.markdown(f'<div class="metric-container" style="border-bottom: 4px solid #F1C40F;"><div class="label-custom">TOP CONFIANCE</div><div style="font-size:0.85em; margin-top:5px;">🥇 {best_n} <b>({get_camelot_pro(best_n)})</b></div><div style="font-size:0.85em;">🥈 {sec_n} <b>({get_camelot_pro(sec_n)})</b></div></div>', unsafe_allow_html=True)
                     col_t1, col_t2 = st.columns(2)
-                    with col_t1: get_sine_witness(best_n, f"best_{file.name}")
-                    with col_t2: get_sine_witness(sec_n, f"sec_{file.name}")
+                    with col_t1: get_sine_witness(best_n, f"best_{file_name}")
+                    with col_t2: get_sine_witness(sec_n, f"sec_{file_name}")
                 
                 with c4: 
                     st.markdown(f'<div class="metric-container"><div class="label-custom">BPM & ENERGIE</div><div class="value-custom">{res["tempo"]}</div><div>E: {res["energy"]}/10</div></div>', unsafe_allow_html=True)
 
-                # --- BLOC DIAGNOSTIC HARMONIQUE ---
                 st.markdown("---")
                 d1, d2, d3 = st.columns([1, 1, 2])
                 with d1:
