@@ -24,7 +24,7 @@ st.set_page_config(page_title="Ricardo_DJ228 | V5 Ultra Pro", page_icon="🎧", 
 if 'history' not in st.session_state:
     st.session_state.history = []
 if 'processed_files' not in st.session_state:
-    st.session_state.processed_files = {} # Pour ignorer les doublons déjà analysés
+    st.session_state.processed_files = {}
 
 # --- DESIGN CSS ---
 st.markdown("""
@@ -116,10 +116,12 @@ def analyze_segment(y, sr):
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, tuning=tuning, bins_per_octave=24)
     chroma_avg = np.mean(chroma, axis=1)
     
+    # PROFILES ENRICHIS (V5) : Intègre les harmoniques complexes (7th, 9th)
     PROFILES = {
         "major": [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88], 
         "minor": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17], 
-        "dorian": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 2.69, 3.98, 3.34, 3.17]
+        "dorian": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 2.69, 3.98, 3.34, 3.17],
+        "complex": [7.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 5.0, 2.0, 3.5, 4.5, 2.5]
     }
     
     best_score, res_key = -1, ""
@@ -127,13 +129,19 @@ def analyze_segment(y, sr):
         for i in range(12):
             score = np.corrcoef(chroma_avg, np.roll(profile, i))[0, 1]
             actual_rolled = np.roll(chroma_avg, -i)
+            # Pénalité si la tierce est absente
             if mode == "major" and actual_rolled[4] < actual_rolled[3]: score -= 0.05
             if mode == "minor" and actual_rolled[3] < actual_rolled[4]: score -= 0.05
+            
             if score > best_score: 
                 best_score, res_key = score, f"{NOTES[i]} {mode}"
+    
+    # Mapping des accords complexes vers le Majeur pour Camelot Compatibility
+    if "complex" in res_key: res_key = res_key.replace("complex", "major")
+    
     return res_key, best_score, chroma_avg
 
-@st.cache_data(show_spinner="Analyse intelligente Ultra V5...")
+@st.cache_data(show_spinner="Analyse Ultra V5...")
 def get_full_analysis(file_buffer):
     file_buffer.seek(0)
     y, sr = librosa.load(file_buffer)
@@ -188,23 +196,19 @@ with tabs[0]:
     
     if files:
         files_to_process = []
-        
-        # --- FILTRAGE DES FICHIERS DEJA ANALYSÉS ---
         for f in files:
             file_id = f"{f.name}_{f.size}"
             if file_id not in st.session_state.processed_files:
                 files_to_process.append(f)
         
-        # --- ANALYSE MULTI-THREAD DES NOUVEAUX FICHIERS ---
         if files_to_process:
-            with st.spinner(f"Analyse V5 de {len(files_to_process)} nouvelles tracks..."):
+            with st.spinner(f"Analyse parallèle V5 ({len(files_to_process)} fichiers)..."):
                 with ThreadPoolExecutor(max_workers=4) as executor:
                     new_results = list(executor.map(get_full_analysis, files_to_process))
                     for r in new_results:
                         fid = f"{r['file_name']}_{r['original_buffer'].size}"
                         st.session_state.processed_files[fid] = r
 
-        # --- AFFICHAGE DE TOUS LES FICHIERS DE LA SÉLECTION ACTUELLE ---
         for f in files:
             fid = f"{f.name}_{f.size}"
             if fid in st.session_state.processed_files:
