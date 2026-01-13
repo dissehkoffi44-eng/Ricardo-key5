@@ -7,6 +7,7 @@ import os
 import tempfile
 import io
 import scipy.io.wavfile as wav
+import shutil
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Audio Perception AI - Pro", layout="wide")
@@ -24,36 +25,26 @@ def get_camelot_key(key, tone):
     return camelot_map.get(f"{key} {tone}", "Inconnu")
 
 def generate_piano_chord(key, tone, duration=2.0, sr=22050):
-    """Génère un accord parfait (fondamentale, tierce, quinte) pour vérification."""
     notes_freq = {
         'C': 261.63, 'C#': 277.18, 'D': 293.66, 'D#': 311.13, 'E': 329.63, 'F': 349.23,
         'F#': 369.99, 'G': 392.00, 'G#': 415.30, 'A': 440.00, 'A#': 466.16, 'B': 493.88
     }
-    
-    # Calcul des indices pour la tierce et la quinte
     notes_list = list(notes_freq.keys())
     root_idx = notes_list.index(key)
-    
-    # Tierce Majeure (+4 demi-tons) ou Mineure (+3 demi-tons)
     third_interval = 4 if tone == "Major" else 3
     third_idx = (root_idx + third_interval) % 12
     fifth_idx = (root_idx + 7) % 12
     
     frequencies = [notes_freq[key], notes_freq[notes_list[third_idx]], notes_freq[notes_list[fifth_idx]]]
-    
     t = np.linspace(0, duration, int(sr * duration), False)
     chord_wave = np.zeros_like(t)
     
     for f in frequencies:
-        # Mix de harmoniques pour simuler un timbre plus riche qu'une simple onde
         chord_wave += 0.5 * np.sin(2 * np.pi * f * t)
-        chord_wave += 0.25 * np.sin(2 * np.pi * (2*f) * t) # Octave
+        chord_wave += 0.25 * np.sin(2 * np.pi * (2*f) * t)
         
-    # Enveloppe simple (fade out) pour éviter le clic
     envelope = np.exp(-2 * t)
     chord_wave = chord_wave * envelope
-    
-    # Normalisation
     chord_wave = (chord_wave / np.max(np.abs(chord_wave)) * 32767).astype(np.int16)
     
     byte_io = io.BytesIO()
@@ -68,8 +59,10 @@ def send_telegram_message(message):
         except: pass
 
 @st.cache_data(show_spinner=False)
-def analyze_human_perception(file_path, original_filename):
-    y, sr = librosa.load(file_path, sr=22050)
+def analyze_human_perception(file_input, original_filename):
+    # librosa peut accepter un file-like object ou un path. 
+    # Pour garantir la compatibilité, on utilise le buffer directement si possible.
+    y, sr = librosa.load(file_input, sr=22050)
     y = librosa.effects.preemphasis(y)
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=512, bins_per_octave=24)
     chroma_vals = np.mean(chroma**2, axis=1)
@@ -96,44 +89,52 @@ def analyze_human_perception(file_path, original_filename):
     return chroma_vals, final_key, final_tone
 
 # --- INTERFACE ---
-st.title("🧠 Perception Auditive AI (Multi-Profils)")
+st.title("🧠 Perception Auditive AI (Multi-Fichiers)")
 st.markdown("---")
 
-uploaded_file = st.file_uploader("Glissez votre fichier audio ici", type=["mp3", "wav", "flac"])
+# Activation du mode multi-fichiers
+uploaded_files = st.file_uploader("Glissez vos fichiers audio ici", type=["mp3", "wav", "flac"], accept_multiple_files=True)
 
-if uploaded_file:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-        tmp_file.write(uploaded_file.getbuffer())
-        tmp_path = tmp_file.name
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        with st.expander(f"🎵 Analyse : {uploaded_file.name}", expanded=True):
+            # Utilisation d'un fichier temporaire pour Librosa (plus stable avec certains formats)
+            # On copie le buffer directement sans faire .read() manuel
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                shutil.copyfileobj(uploaded_file, tmp_file)
+                tmp_path = tmp_file.name
 
-    st.audio(uploaded_file)
-    
-    with st.spinner(f"Analyse de : {uploaded_file.name}..."):
-        try:
-            chroma_vals, key, tone = analyze_human_perception(tmp_path, uploaded_file.name)
-            camelot = get_camelot_key(key, tone)
-            result_text = f"{key} {tone}"
+            st.audio(uploaded_file)
+            
+            with st.spinner(f"Traitement de {uploaded_file.name}..."):
+                try:
+                    # On passe le chemin du fichier temporaire
+                    chroma_vals, key, tone = analyze_human_perception(tmp_path, uploaded_file.name)
+                    camelot = get_camelot_key(key, tone)
+                    result_text = f"{key} {tone}"
 
-            col1, col2 = st.columns(2)
-            col1.metric("Tonalité Détectée", result_text)
-            col2.metric("Code Camelot", camelot)
+                    col1, col2 = st.columns(2)
+                    col1.metric("Tonalité Détectée", result_text)
+                    col2.metric("Code Camelot", camelot)
 
-            # --- AJOUT DU SON DE VÉRIFICATION ---
-            st.write(f"### 🎹 Vérification à l'oreille ({result_text})")
-            chord_audio = generate_piano_chord(key, tone)
-            st.audio(chord_audio, format="audio/wav")
+                    # --- SON DE VÉRIFICATION ---
+                    st.write(f"### 🎹 Vérification ({result_text})")
+                    chord_audio = generate_piano_chord(key, tone)
+                    st.audio(chord_audio, format="audio/wav")
 
-            # Graphique Radar
-            categories = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-            fig = go.Figure(data=go.Scatterpolar(r=chroma_vals, theta=categories, fill='toself', line_color='#00FFAA'))
-            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
+                    # Radar Chart
+                    categories = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+                    fig = go.Figure(data=go.Scatterpolar(r=chroma_vals, theta=categories, fill='toself', line_color='#00FFAA'))
+                    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), template="plotly_dark", margin=dict(l=20, r=20, t=20, b=20))
+                    st.plotly_chart(fig, use_container_width=True)
 
-            send_telegram_message(f"🎵 *Analyse*\n*Fichier :* {uploaded_file.name}\n*Résultat :* {result_text}\n*Camelot :* {camelot}")
-            st.success("Analyse terminée.")
+                    send_telegram_message(f"🎵 *Analyse*\n*Fichier :* {uploaded_file.name}\n*Résultat :* {result_text}\n*Camelot :* {camelot}")
+                    
+                except Exception as e:
+                    st.error(f"Erreur sur {uploaded_file.name} : {e}")
+                finally:
+                    # Nettoyage du fichier temporaire
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
 
-        except Exception as e:
-            st.error(f"Erreur : {e}")
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+    st.success("Toutes les analyses sont terminées.")
