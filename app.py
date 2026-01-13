@@ -60,16 +60,34 @@ def send_telegram_message(message):
 
 @st.cache_data(show_spinner=False)
 def analyze_human_perception(file_input, original_filename):
+    # 1. Chargement (22kHz suffit pour l'analyse harmonique)
     y, sr = librosa.load(file_input, sr=22050)
-    y = librosa.effects.preemphasis(y)
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=512, bins_per_octave=24)
-    chroma_vals = np.mean(chroma**2, axis=1)
     
-    if np.max(chroma_vals) > 0:
-        chroma_vals = chroma_vals / np.max(chroma_vals)
+    # 2. Séparation Harmonique / Percussive
+    # On isole les instruments tonaux (mélodie/accords) des percussions
+    y_harmonic = librosa.effects.hpss(y)[0]
+    
+    # 3. Chromagramme CQT (Constant-Q Transform)
+    # 36 bins par octave pour une résolution fine, puis replié sur 12 demi-tons
+    chroma = librosa.feature.chroma_cqt(y=y_harmonic, sr=sr, bins_per_octave=36)
+    
+    # 4. Conversion en Décibels (Perception logarithmique humaine)
+    chroma_db = librosa.amplitude_to_db(chroma, ref=np.max)
+    
+    # Nettoyage : on ignore le bruit sous -30dB
+    chroma_db = np.maximum(chroma_db, -30)
+    
+    # Moyenne temporelle des notes
+    chroma_vals = np.mean(chroma_db, axis=1)
+    
+    # Normalisation 0-1 pour la comparaison mathématique
+    chroma_vals -= chroma_vals.min()
+    if chroma_vals.max() > 0:
+        chroma_vals /= chroma_vals.max()
 
-    maj_profile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
-    min_profile = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+    # 5. Profils de Temperley (Modernes et adaptés à la musique Pop/Rock/Electronic)
+    maj_profile = [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0]
+    min_profile = [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0]
     notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
     
     best_score = -1
@@ -77,8 +95,11 @@ def analyze_human_perception(file_input, original_filename):
 
     for i in range(12):
         p_maj, p_min = np.roll(maj_profile, i), np.roll(min_profile, i)
+        
+        # Corrélation de Pearson entre l'audio et les profils théoriques
         score_maj = np.corrcoef(chroma_vals, p_maj)[0, 1]
         score_min = np.corrcoef(chroma_vals, p_min)[0, 1]
+        
         if score_maj > best_score:
             best_score, final_key, final_tone = score_maj, notes[i], "Major"
         if score_min > best_score:
@@ -87,10 +108,10 @@ def analyze_human_perception(file_input, original_filename):
     return chroma_vals, final_key, final_tone
 
 # --- INTERFACE ---
-st.title("🧠 Perception Auditive AI (Multi-Fichiers)")
+st.title("🧠 Perception Auditive AI Expert")
 st.markdown("---")
 
-uploaded_files = st.file_uploader("Glissez vos fichiers audio ici", type=["mp3", "wav", "flac"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Glissez vos fichiers audio ici (MP3, WAV, FLAC)", type=["mp3", "wav", "flac"], accept_multiple_files=True)
 
 if uploaded_files:
     for uploaded_file in uploaded_files:
@@ -101,7 +122,7 @@ if uploaded_files:
 
             st.audio(uploaded_file)
             
-            with st.spinner(f"Traitement de {uploaded_file.name}..."):
+            with st.spinner(f"Analyse perceptive de {uploaded_file.name}..."):
                 try:
                     chroma_vals, key, tone = analyze_human_perception(tmp_path, uploaded_file.name)
                     camelot = get_camelot_key(key, tone)
@@ -116,13 +137,18 @@ if uploaded_files:
                     chord_audio = generate_piano_chord(key, tone)
                     st.audio(chord_audio, format="audio/wav")
 
-                    # Radar Chart
+                    # Radar Chart des forces harmoniques
                     categories = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
                     fig = go.Figure(data=go.Scatterpolar(r=chroma_vals, theta=categories, fill='toself', line_color='#00FFAA'))
-                    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), template="plotly_dark", margin=dict(l=20, r=20, t=20, b=20))
+                    fig.update_layout(
+                        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+                        template="plotly_dark",
+                        margin=dict(l=50, r=50, t=20, b=20),
+                        title="Empreinte Harmonique (Relative)"
+                    )
                     st.plotly_chart(fig, use_container_width=True)
 
-                    send_telegram_message(f"🎵 *Analyse*\n*Fichier :* {uploaded_file.name}\n*Résultat :* {result_text}\n*Camelot :* {camelot}")
+                    send_telegram_message(f"🎵 *Analyse Experte*\n*Fichier :* {uploaded_file.name}\n*Résultat :* {result_text}\n*Camelot :* {camelot}")
                     
                 except Exception as e:
                     st.error(f"Erreur sur {uploaded_file.name} : {e}")
