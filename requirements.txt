@@ -3,6 +3,6 @@ librosa
 numpy
 pandas
 plotly
-mutagen
 requests
-soundfile
+scipy
+kaleido==0.2.1
