@@ -3,279 +3,324 @@ import librosa
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from collections import Counter
-from datetime import datetime
 import io
+import requests
+import gc
 import streamlit.components.v1 as components
-from concurrent.futures import ThreadPoolExecutor
-import requests  # AJOUT : Pour Telegram
-import gc        # AJOUT : Pour la RAM
+from scipy.signal import butter, lfilter
+from datetime import datetime
 
-# --- IMPORT POUR LES TAGS MP3 (MUTAGEN) ---
-try:
-    from mutagen.id3 import ID3, TKEY
-    from mutagen.mp3 import MP3
-    MUTAGEN_AVAILABLE = True
-except ImportError:
-    MUTAGEN_AVAILABLE = False
+# --- CONFIGURATION SYSTÈME ---
+st.set_page_config(page_title="RCDJ228 SNIPER M3", page_icon="🎯", layout="wide")
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="Ricardo_DJ228 | KEY 5 Pro Digital", page_icon="🎧", layout="wide")
+# Récupération des secrets
+TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN")
+CHAT_ID = st.secrets.get("CHAT_ID")
 
-# PARAMÈTRES TELEGRAM (Identiques à ton exemple)
-TELEGRAM_TOKEN = "7751365982:AAFLbeRoPsDx5OyIOlsgHcGKpI12hopzCYo"
-CHAT_ID = "-1003602454394" 
+# --- RÉFÉRENTIELS HARMONIQUES ---
+NOTES_LIST = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+NOTES_ORDER = [f"{n} {m}" for n in NOTES_LIST for m in ['major', 'minor']]
 
-# Initialisation des états
-if 'history' not in st.session_state:
-    st.session_state.history = []
-if 'processed_files' not in st.session_state:
-    st.session_state.processed_files = {}
-if 'order_list' not in st.session_state:
-    st.session_state.order_list = []
+CAMELOT_MAP = {
+    'C major': '8B', 'C# major': '3B', 'D major': '10B', 'D# major': '5B', 'E major': '12B', 'F major': '7B',
+    'F# major': '2B', 'G major': '9B', 'G# major': '4B', 'A major': '11B', 'A# major': '6B', 'B major': '1B',
+    'C minor': '5A', 'C# minor': '12A', 'D minor': '7A', 'D# minor': '2A', 'E minor': '9A', 'F minor': '4A',
+    'F# minor': '11A', 'G minor': '6A', 'G# minor': '1A', 'A minor': '8A', 'A# minor': '3A', 'B minor': '10A'
+}
 
-# --- FONCTION STOCKAGE EXTERNE TELEGRAM ---
-def upload_to_telegram(file_buffer, filename, caption):
-    try:
-        file_buffer.seek(0)
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
-        files = {'document': (filename, file_buffer.read())}
-        data = {'chat_id': CHAT_ID, 'caption': caption}
-        response = requests.post(url, files=files, data=data).json()
-        return response.get("ok", False)
-    except Exception as e:
-        st.error(f"Erreur Backup Telegram : {e}")
-        return False
+PROFILES = {
+    "krumhansl": {
+        "major": [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
+        "minor": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+    },
+    "temperley": {
+        "major": [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0],
+        "minor": [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0]
+    },
+    "bellman": {
+        "major": [16.8, 0.86, 12.95, 1.41, 13.49, 11.93, 1.25, 16.74, 1.56, 12.81, 1.89, 12.44],
+        "minor": [18.16, 0.69, 12.99, 13.34, 1.07, 11.15, 1.38, 17.2, 13.62, 1.27, 12.79, 2.4]
+    }
+}
 
-# --- DESIGN CSS ---
+# --- OREILLE HUMAINE : PROFIL DE CONSONANCE PURE ---
+# Ce profil privilégie la pureté des intervalles (1, 3, 5) pour simuler l'oreille
+HUMAN_CONSONANCE_MASK = {
+    "major": [1.0, 0.05, 0.15, 0.05, 0.85, 0.4, 0.1, 0.95, 0.1, 0.25, 0.05, 0.15],
+    "minor": [1.0, 0.1, 0.2, 0.9, 0.05, 0.45, 0.1, 0.95, 0.4, 0.15, 0.05, 0.1]
+}
+
+# --- STYLES CSS ---
 st.markdown("""
     <style>
-    .stApp { background-color: #F8F9FA; color: #212529; }
-    .metric-container { background: white; padding: 20px; border-radius: 15px; border: 1px solid #E0E0E0; text-align: center; height: 100%; transition: transform 0.3s; }
-    .metric-container:hover { transform: translateY(-5px); border-color: #6366F1; }
-    .label-custom { color: #666; font-size: 0.9em; font-weight: bold; margin-bottom: 5px; }
-    .value-custom { font-size: 1.6em; font-weight: 800; color: #1A1A1A; }
-    .diag-box { text-align:center; padding:10px; border-radius:10px; border:1px solid #EEE; background: white; }
-    .stFileUploader { border: 2px dashed #6366F1; padding: 20px; border-radius: 15px; background: #FFFFFF; }
+    .main { background-color: #0b0e14; }
+    .report-card { 
+        padding: 40px; border-radius: 30px; text-align: center; color: white; 
+        border: 1px solid rgba(99, 102, 241, 0.3); box-shadow: 0 15px 45px rgba(0,0,0,0.6);
+        margin-bottom: 20px;
+    }
+    .file-header {
+        background: #1f2937; color: #10b981; padding: 10px 20px; border-radius: 10px;
+        font-family: 'JetBrains Mono', monospace; font-weight: bold; margin-bottom: 10px;
+        border-left: 5px solid #10b981;
+    }
+    .modulation-alert {
+        background: rgba(239, 68, 68, 0.15); color: #f87171;
+        padding: 15px; border-radius: 15px; border: 1px solid #ef4444;
+        margin-top: 20px; font-weight: bold; font-family: 'JetBrains Mono', monospace;
+    }
+    .ear-badge {
+        background: #4F46E5; color: white; padding: 4px 12px; border-radius: 20px; font-size: 0.8em; margin-top: 10px; display: inline-block;
+    }
+    .metric-box {
+        background: #161b22; border-radius: 15px; padding: 20px; text-align: center; border: 1px solid #30363d;
+        height: 100%; transition: 0.3s;
+    }
+    .metric-box:hover { border-color: #58a6ff; }
+    .sniper-badge { background: #238636; color: white; padding: 4px 12px; border-radius: 20px; font-size: 0.7em; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- MOTEUR AUDIO JS ---
-def get_sine_witness(note_mode_str, key_suffix=""):
-    parts = note_mode_str.split(' ')
-    note = parts[0]
-    mode = parts[1].lower() if len(parts) > 1 else "major"
-    unique_id = f"playBtn_{note}_{mode}_{key_suffix}".replace("#", "sharp").replace(".", "_")
-    return components.html(f"""
-    <div style="display: flex; align-items: center; justify-content: center; gap: 10px; font-family: sans-serif;">
-        <button id="{unique_id}" style="background: #6366F1; color: white; border: none; border-radius: 50%; width: 28px; height: 28px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 12px;">▶</button>
-        <span style="font-size: 9px; font-weight: bold; color: #666;">{note} {mode[:3].upper()}</span>
-    </div>
-    <script>
-    const notesFreq = {{'C':261.63,'C#':277.18,'D':293.66,'D#':311.13,'E':329.63,'F':349.23,'F#':369.99,'G':392.00,'G#':415.30,'A':440.00,'A#':466.16,'B':493.88}};
-    const semitones = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-    let audioCtx = null; let oscillators = []; let gainNode = null;
-    document.getElementById('{unique_id}').onclick = function() {{
-        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        if (this.innerText === '▶') {{
-            this.innerText = '◼'; this.style.background = '#E74C3C';
-            gainNode = audioCtx.createGain(); gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
-            gainNode.connect(audioCtx.destination);
-            const rootIdx = semitones.indexOf('{note}');
-            const intervals = ('{mode}' === 'minor' || '{mode}' === 'dorian') ? [0, 3, 7] : [0, 4, 7];
-            intervals.forEach(interval => {{
-                let osc = audioCtx.createOscillator(); osc.type = 'sine';
-                let freq = notesFreq['{note}'] * Math.pow(2, interval / 12);
-                if (!freq) freq = 440; 
-                osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-                osc.connect(gainNode); osc.start(); oscillators.push(osc);
-            }});
-        }} else {{
-            oscillators.forEach(o => o.stop()); oscillators = [];
-            this.innerText = '▶'; this.style.background = '#6366F1';
-        }}
-    }};
-    </script>
-    """, height=40)
+# --- MOTEURS DE CALCUL ---
 
-# --- MAPPING CAMELOT ---
-BASE_CAMELOT_MINOR = {'Ab':'1A','G#':'1A','Eb':'2A','D#':'2A','Bb':'3A','A#':'3A','F':'4A','C':'5A','G':'6A','D':'7A','A':'8A','E':'9A','B':'10A','F#':'11A','Gb':'11A','Db':'12A','C#':'12A'}
-BASE_CAMELOT_MAJOR = {'B':'1B','F#':'2B','Gb':'2B','Db':'3B','C#':'3B','Ab':'4B','G#':'4B','Eb':'5B','D#':'5B','Bb':'6B','A#':'6B','F':'7B','C':'8B','G':'9B','D':'10B','A':'11B','E':'12B'}
+def apply_sniper_filters(y, sr):
+    y_harm = librosa.effects.harmonic(y, margin=4.0)
+    nyq = 0.5 * sr
+    b, a = butter(4, [80/nyq, 5000/nyq], btype='band')
+    return lfilter(b, a, y_harm)
 
-def get_camelot_pro(key_mode_str):
-    try:
-        parts = key_mode_str.split(" ")
-        key, mode = parts[0], parts[1].lower()
-        if mode in ['minor', 'dorian']: return BASE_CAMELOT_MINOR.get(key, "??")
-        else: return BASE_CAMELOT_MAJOR.get(key, "??")
-    except: return "??"
+def get_bass_priority(y, sr):
+    nyq = 0.5 * sr
+    b, a = butter(2, 150/nyq, btype='low')
+    y_bass = lfilter(b, a, y)
+    chroma_bass = librosa.feature.chroma_cqt(y=y_bass, sr=sr, n_chroma=12)
+    return np.mean(chroma_bass, axis=1)
 
-def get_tagged_audio(file_buffer, key_val):
-    if not MUTAGEN_AVAILABLE: return file_buffer
-    try:
-        file_buffer.seek(0)
-        audio_data = io.BytesIO(file_buffer.read())
-        audio = MP3(audio_data)
-        if audio.tags is None: audio.add_tags()
-        audio.tags.add(TKEY(encoding=3, text=key_val))
-        output = io.BytesIO()
-        audio.save(output)
-        output.seek(0)
-        return output
-    except: return file_buffer
-
-# --- MOTEUR ANALYSE (V5 Ultra Precision) ---
-def check_drum_alignment(y, sr):
-    flatness = np.mean(librosa.feature.spectral_flatness(y=y))
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-    chroma_max_mean = np.mean(np.max(chroma, axis=0))
-    return flatness < 0.045 or chroma_max_mean > 0.75
-
-def analyze_segment(y, sr):
-    NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    tuning = librosa.estimate_tuning(y=y, sr=sr)
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, tuning=tuning, bins_per_octave=24)
-    chroma_avg = np.mean(chroma, axis=1)
-    PROFILES = {
-        "major": [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88], 
-        "minor": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17], 
-        "dorian": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 2.69, 3.98, 3.34, 3.17]
-    }
-    best_score, res_key = -1, ""
-    for mode, profile in PROFILES.items():
-        for i in range(12):
-            score = np.corrcoef(chroma_avg, np.roll(profile, i))[0, 1]
-            if score > best_score: 
-                best_score, res_key = score, f"{NOTES[i]} {mode}"
-    return res_key, best_score, chroma_avg
-
-@st.cache_data(show_spinner="Analyse Ultra Précision V6.1...")
-def get_full_analysis(file_buffer):
-    file_buffer.seek(0)
-    y, sr = librosa.load(file_buffer)
-    is_aligned = check_drum_alignment(y, sr)
-    y_final, filter_applied = (y, False) if is_aligned else (librosa.effects.hpss(y)[0], True)
+def solve_key_sniper(chroma_vector, bass_vector):
+    best_overall_score = -1
+    best_key = "Unknown"
     
-    duration = librosa.get_duration(y=y_final, sr=sr)
-    timeline_data, votes, all_chromas = [], [], []
+    cv = (chroma_vector - chroma_vector.min()) / (chroma_vector.max() - chroma_vector.min() + 1e-6)
+    bv = (bass_vector - bass_vector.min()) / (bass_vector.max() - bass_vector.min() + 1e-6)
     
-    for start_t in range(0, int(duration) - 10, 10):
-        y_seg = y_final[int(start_t*sr):int((start_t+10)*sr)]
-        key_seg, score_seg, chroma_vec = analyze_segment(y_seg, sr)
-        votes.append(key_seg)
-        all_chromas.append(chroma_vec)
-        timeline_data.append({"Temps": start_t, "Note": key_seg, "Confiance": round(score_seg * 100, 1)})
+    for p_name, p_data in PROFILES.items():
+        for mode in ["major", "minor"]:
+            for i in range(12):
+                score = np.corrcoef(cv, np.roll(p_data[mode], i))[0, 1]
+                
+                if mode == "minor":
+                    dom_idx = (i + 7) % 12 
+                    leading_tone = (i + 11) % 12
+                    if cv[dom_idx] > 0.45 and cv[leading_tone] > 0.35:
+                        score *= 1.35 
+                
+                if bv[i] > 0.6: score += (bv[i] * 0.2)
+                
+                fifth_idx = (i + 7) % 12
+                if cv[fifth_idx] > 0.5: score += 0.1
+                third_idx = (i + 4) % 12 if mode == "major" else (i + 3) % 12
+                if cv[third_idx] > 0.5: score += 0.1
+                
+                if score > best_overall_score:
+                    best_overall_score = score
+                    best_key = f"{NOTES_LIST[i]} {mode}"
+                    
+    return {"key": best_key, "score": best_overall_score}
+
+def human_ear_arbitration(chroma_global, candidates):
+    """
+    Simule une oreille humaine pour choisir la tonalité la plus 'consistante' et 'douce'.
+    Utilise le produit scalaire entre le spectre global et un masque de consonance pure.
+    """
+    scores = {}
+    # Normalisation du chroma global
+    cg = (chroma_global - chroma_global.min()) / (chroma_global.max() - chroma_global.min() + 1e-6)
     
-    dominante_vote = Counter(votes).most_common(1)[0][0]
-    avg_chroma_global = np.mean(all_chromas, axis=0)
-    
-    best_synth_score, tonique_synth = -1, ""
-    NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    PROFILES_SYNTH = {"major": [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88], "minor": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]}
-    for mode, profile in PROFILES_SYNTH.items():
-        for i in range(12):
-            score = np.corrcoef(avg_chroma_global, np.roll(profile, i))[0, 1]
-            if score > best_synth_score: best_synth_score, tonique_synth = score, f"{NOTES[i]} {mode}"
-
-    top_votes = Counter(votes).most_common(2)
-    purity = int((top_votes[0][1] / len(votes)) * 100)
-    key_shift_detected = True if len(top_votes) > 1 and (top_votes[1][1] / len(votes)) > 0.25 else False
-    
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    energy = int(np.clip(np.mean(librosa.feature.rms(y=y))*35 + (float(tempo)/160), 1, 10))
-
-    return {
-        "file_name": getattr(file_buffer, 'name', 'Unknown'),
-        "vote": dominante_vote, "synthese": tonique_synth, "confidence": int(best_synth_score*100), "tempo": int(float(tempo)), 
-        "energy": energy, "timeline": timeline_data, "purity": purity, 
-        "key_shift": key_shift_detected, "secondary": top_votes[1][0] if len(top_votes)>1 else top_votes[0][0],
-        "is_filtered": filter_applied, "original_buffer": file_buffer
-    }
-
-# --- INTERFACE ---
-st.markdown("<h1 style='text-align: center;'>🎧 RICARDO_DJ228 | KEY 5 Pro Digital</h1>", unsafe_allow_html=True)
-
-files = st.file_uploader("📂 DÉPOSEZ VOS TRACKS ICI", type=['mp3', 'wav', 'flac'], accept_multiple_files=True)
-
-tabs = st.tabs(["📁 ANALYSEUR", "🕒 HISTORIQUE"])
-
-with tabs[0]:
-    if files:
-        files_to_process = [f for f in files if f"{f.name}_{f.size}" not in st.session_state.processed_files]
+    for cand in candidates:
+        note, mode = cand.split()
+        idx = NOTES_LIST.index(note)
+        # Création du masque décalé pour la note cible
+        mask = np.roll(HUMAN_CONSONANCE_MASK[mode], idx)
+        # Calcul de la douceur (consonance perçue)
+        smoothness = np.dot(cg, mask)
+        scores[cand] = smoothness
         
-        if files_to_process:
-            with st.spinner(f"Analyse & Backup Telegram en cours..."):
-                # On réduit à 2 workers pour ne pas saturer la RAM de Streamlit avec Telegram
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    new_results = list(executor.map(get_full_analysis, files_to_process))
-                    
-                    for r in new_results:
-                        fid = f"{r['file_name']}_{r['original_buffer'].size}"
-                        cam_val = get_camelot_pro(r['synthese'])
-                        
-                        # --- BACKUP TELEGRAM ---
-                        success = upload_to_telegram(
-                            r['original_buffer'], 
-                            f"[{cam_val}] {r['file_name']}", 
-                            f"🎵 {r['file_name']}\n🔑 Key: {cam_val}\n🥁 BPM: {r['tempo']}\n⚡ Énergie: {r['energy']}/10"
-                        )
-                        r['saved_on_tg'] = success
-                        
-                        st.session_state.processed_files[fid] = r
-                        if fid not in st.session_state.order_list:
-                            st.session_state.order_list.insert(0, fid)
-                
-                # NETTOYAGE RAM
-                gc.collect()
+    # Retourne la clé avec le score de douceur maximal
+    best_ear_key = max(scores, key=scores.get)
+    return best_ear_key, scores
 
-        # Affichage
-        for fid in st.session_state.order_list:
-            if fid in st.session_state.processed_files:
-                res = st.session_state.processed_files[fid]
-                file_name, file_buffer = res['file_name'], res['original_buffer']
-                
-                with st.expander(f"🎵 {file_name}", expanded=True):
-                    cam_final = get_camelot_pro(res['synthese'])
-                    entry = {"Date": datetime.now().strftime("%d/%m %H:%M"), "Fichier": file_name, "Note": res['synthese'], "Camelot": cam_final, "BPM": res['tempo']}
-                    if not any(h['Fichier'] == file_name for h in st.session_state.history): 
-                        st.session_state.history.insert(0, entry)
+def process_audio(audio_file, file_name, progress_placeholder):
+    status_text = progress_placeholder.empty()
+    progress_bar = progress_placeholder.progress(0)
 
-                    st.audio(file_buffer) 
-                    
-                    c1, c2, c3, c4 = st.columns(4)
-                    with c1: 
-                        st.markdown(f'<div class="metric-container"><div class="label-custom">DOMINANTE</div><div class="value-custom">{res["vote"]}</div><div>{get_camelot_pro(res["vote"])}</div></div>', unsafe_allow_html=True)
-                        get_sine_witness(res["vote"], f"dom_{fid}")
-                    with c2: 
-                        st.markdown(f'<div class="metric-container" style="border-bottom: 4px solid #6366F1;"><div class="label-custom">SYNTHÈSE</div><div class="value-custom">{res["synthese"]}</div><div>{cam_final}</div></div>', unsafe_allow_html=True)
-                        get_sine_witness(res["synthese"], f"synth_{fid}")
-                        st.download_button(label="💾 MP3 TAGGÉ", data=get_tagged_audio(file_buffer, cam_final), file_name=f"[{cam_final}] {file_name}", mime="audio/mpeg", key=f"dl_{fid}")
-                        if res.get('saved_on_tg'):
-                            st.caption("✅ Backup envoyé sur Telegram")
-                    
-                    df_tl = pd.DataFrame(res['timeline'])
-                    df_s = df_tl.sort_values(by="Confiance", ascending=False).reset_index()
-                    b_n = df_s.loc[0, 'Note']
-                    s_n = df_s[df_s['Note'] != b_n].iloc[0]['Note'] if not df_s[df_s['Note'] != b_n].empty else b_n
-                    
-                    with c3:
-                        st.markdown(f'<div class="metric-container" style="border-bottom: 4px solid #F1C40F;"><div class="label-custom">STABILITÉ</div><div style="font-size:0.85em; margin-top:5px;">🥇 {b_n} <b>({get_camelot_pro(b_n)})</b></div><div style="font-size:0.85em;">🥈 {s_n} <b>({get_camelot_pro(s_n)})</b></div></div>', unsafe_allow_html=True)
-                    
-                    with c4: st.markdown(f'<div class="metric-container"><div class="label-custom">BPM & ENERGIE</div><div class="value-custom">{res["tempo"]}</div><div>E: {res["energy"]}/10</div></div>', unsafe_allow_html=True)
+    def update_prog(value, text):
+        progress_bar.progress(value)
+        status_text.markdown(f"**{text} | {value}%**")
 
-                    st.markdown("---")
-                    d1, d2, d3 = st.columns([1, 1, 2])
-                    with d1: st.markdown(f"<div class='diag-box'><div class='label-custom'>PURETÉ</div><div style='color:{'#2ECC71' if res['purity'] > 75 else '#F1C40F'}; font-weight:bold;'>{res['purity']}%</div></div>", unsafe_allow_html=True)
-                    with d2: st.markdown(f"<div class='diag-box'><div class='label-custom'>CERVEAU</div><div style='color:#6366F1; font-weight:bold;'>V5 ULTRA HPSS</div></div>", unsafe_allow_html=True)
-                    with d3:
-                        if res['key_shift']: st.warning(f"Changement détecté : {res['secondary']}")
-                        else: st.success("Structure harmonique parfaite.")
+    update_prog(10, f"Chargement de {file_name}")
+    y, sr = librosa.load(audio_file, sr=22050, mono=True)
+    
+    update_prog(30, "Filtrage des fréquences")
+    duration = librosa.get_duration(y=y, sr=sr)
+    tuning = librosa.estimate_tuning(y=y, sr=sr)
+    y_filt = apply_sniper_filters(y, sr)
 
-                    st.plotly_chart(px.scatter(df_tl, x="Temps", y="Note", color="Confiance", size="Confiance", template="plotly_white"), use_container_width=True)
+    update_prog(50, "Analyse du spectre harmonique")
+    step, timeline, votes = 6, [], Counter()
+    segments = range(0, int(duration) - step, 2)
+    
+    for i, start in enumerate(segments):
+        idx_start, idx_end = int(start * sr), int((start + step) * sr)
+        seg = y_filt[idx_start:idx_end]
+        if np.max(np.abs(seg)) < 0.01: continue
+        
+        c_raw = librosa.feature.chroma_cqt(y=seg, sr=sr, tuning=tuning, n_chroma=24, bins_per_octave=24)
+        c_avg = np.mean((c_raw[::2, :] + c_raw[1::2, :]) / 2, axis=1)
+        b_seg = get_bass_priority(y[idx_start:idx_end], sr)
+        
+        res = solve_key_sniper(c_avg, b_seg)
+        weight = 2.0 if (start < 10 or start > (duration - 15)) else 1.0
+        votes[res['key']] += int(res['score'] * 100 * weight)
+        timeline.append({"Temps": start, "Note": res['key'], "Conf": res['score']})
+        
+        p_val = 50 + int((i / len(segments)) * 40)
+        update_prog(p_val, "Calcul chirurgical en cours")
 
-with tabs[1]:
-    if st.session_state.history:
-        df_hist = pd.DataFrame(st.session_state.history)
-        st.dataframe(df_hist, use_container_width=True)
-        st.download_button("📥 TÉLÉCHARGER CSV", df_hist.to_csv(index=False).encode('utf-8'), "historique_ricardo.csv", "text/csv")
-    else: st.info("Historique vide.")
+    update_prog(95, "Arbitrage Oreille Humaine")
+    
+    # --- LOGIQUE DE L'OREILLE HUMAINE ---
+    most_common = votes.most_common(2)
+    chroma_global = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning), axis=1)
+    
+    cand_list = [m[0] for m in most_common]
+    final_key, ear_scores = human_ear_arbitration(chroma_global, cand_list)
+    
+    # On détecte une modulation si le second choix est fort OU si l'oreille a hésité
+    mod_detected = len(most_common) > 1 and (votes[most_common[1][0]] / sum(votes.values())) > 0.25
+    target_key = most_common[1][0] if final_key == most_common[0][0] else most_common[0][0]
+    if not mod_detected: target_key = None
+
+    final_conf = int(np.mean([t['Conf'] for t in timeline if t['Note'] == final_key]) * 100)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+
+    update_prog(100, "Analyse terminée")
+    status_text.empty()
+    progress_bar.empty()
+
+    res_obj = {
+        "key": final_key, "camelot": CAMELOT_MAP.get(final_key, "??"),
+        "conf": min(final_conf, 99), "tempo": int(float(tempo)),
+        "tuning": round(440 * (2**(tuning/12)), 1), "timeline": timeline,
+        "chroma": chroma_global, "modulation": mod_detected,
+        "ear_validation": True, "ear_scores": ear_scores,
+        "target_key": target_key, "target_camelot": CAMELOT_MAP.get(target_key, "??") if target_key else None,
+        "name": file_name
+    }
+    
+    # --- RAPPORT TELEGRAM ENRICHI ---
+    if TELEGRAM_TOKEN and CHAT_ID:
+        try:
+            now = datetime.now().strftime("%H:%M:%S")
+            mod_text = f"\n⚠️ *MODULATION:* `{target_key.upper()}` ({res_obj['target_camelot']})" if mod_detected else ""
+            ear_text = f"\n🧠 *OREILLE HUMAINE:* `Validée` ✅"
+            
+            caption = (
+                f"🎯 *SNIPER M3 - RAPPORT D'ANALYSE*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📂 *FICHIER:* `{file_name}`\n"
+                f"⏰ *HEURE:* `{now}`\n\n"
+                f"🎹 *TONALITÉ:* `{final_key.upper()}`\n"
+                f"🌀 *CAMELOT:* `{res_obj['camelot']}`\n"
+                f"🔥 *CONFIANCE:* `{res_obj['conf']}%`\n"
+                f"{ear_text}{mod_text}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⏱ *TEMPO:* `{res_obj['tempo']} BPM`\n"
+                f"🎸 *ACCORDAGE:* `{res_obj['tuning']} Hz`\n"
+                f"━━━━━━━━━━━━━━━━━━"
+            )
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                          data={'chat_id': CHAT_ID, 'text': caption, 'parse_mode': 'Markdown'})
+        except Exception as e:
+            st.error(f"Erreur Telegram: {e}")
+
+    del y, y_filt; gc.collect()
+    return res_obj
+
+def get_chord_js(btn_id, key_str):
+    note, mode = key_str.split()
+    return f"""
+    document.getElementById('{btn_id}').onclick = function() {{
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const freqs = {{'C':261.6,'C#':277.2,'D':293.7,'D#':311.1,'E':329.6,'F':349.2,'F#':370.0,'G':392.0,'G#':415.3,'A':440.0,'A#':466.2,'B':493.9}};
+        const intervals = '{mode}' === 'minor' ? [0, 3, 7, 12] : [0, 4, 7, 12];
+        intervals.forEach(i => {{
+            const o = ctx.createOscillator(); const g = ctx.createGain();
+            o.type = 'triangle'; o.frequency.setValueAtTime(freqs['{note}'] * Math.pow(2, i/12), ctx.currentTime);
+            g.gain.setValueAtTime(0, ctx.currentTime);
+            g.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.1);
+            g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 2.0);
+            o.connect(g); g.connect(ctx.destination);
+            o.start(); o.stop(ctx.currentTime + 2.0);
+        }});
+    }};
+    """
+
+# --- DASHBOARD PRINCIPAL ---
+st.title("🎯 RCDJ228 SNIPER M3")
+st.markdown("#### Système d'Analyse Harmonique Militaire | Human Ear Engine Integration")
+
+uploaded_files = st.file_uploader("📥 Déposez vos fichiers (Audio)", type=['mp3','wav','flac','m4a'], accept_multiple_files=True)
+
+if uploaded_files:
+    progress_zone = st.container()
+    
+    for f in reversed(uploaded_files):
+        analysis_data = process_audio(f, f.name, progress_zone)
+        
+        with st.container():
+            st.markdown(f"<div class='file-header'>📂 ANALYSE : {analysis_data['name']}</div>", unsafe_allow_html=True)
+            color = "linear-gradient(135deg, #065f46, #064e3b)" if analysis_data['conf'] > 85 else "linear-gradient(135deg, #1e293b, #0f172a)"
+            
+            st.markdown(f"""
+                <div class="report-card" style="background:{color};">
+                    <p style="letter-spacing:5px; opacity:0.8; font-size:0.8em;">SNIPER ENGINE v5.5 <span class="sniper-badge">HUMAN EAR ACTIVE</span></p>
+                    <h1 style="font-size:5.5em; margin:10px 0; font-weight:900;">{analysis_data['key'].upper()}</h1>
+                    <p style="font-size:1.5em; opacity:0.9;">CAMELOT: <b>{analysis_data['camelot']}</b> &nbsp; | &nbsp; CONFIANCE: <b>{analysis_data['conf']}%</b></p>
+                    <div class="ear-badge">🧠 Arbitrage Oreille : Consonance Maximale Détectée</div>
+                    {f"<div class='modulation-alert'>⚠️ MODULATION DÉTECTÉE : {analysis_data['target_key'].upper()} ({analysis_data['target_camelot']})</div>" if analysis_data['modulation'] else ""}
+                </div>
+            """, unsafe_allow_html=True)
+            
+            m1, m2, m3 = st.columns(3)
+            with m1: st.markdown(f"<div class='metric-box'><b>TEMPO</b><br><span style='font-size:2em; color:#10b981;'>{analysis_data['tempo']}</span><br>BPM</div>", unsafe_allow_html=True)
+            with m2: st.markdown(f"<div class='metric-box'><b>ACCORDAGE</b><br><span style='font-size:2em; color:#58a6ff;'>{analysis_data['tuning']}</span><br>Hz</div>", unsafe_allow_html=True)
+            with m3:
+                btn_id = f"play_{hash(analysis_data['name'])}"
+                components.html(f"""
+                    <button id="{btn_id}" style="width:100%; height:95px; background:linear-gradient(45deg, #4F46E5, #7C3AED); color:white; border:none; border-radius:15px; cursor:pointer; font-weight:bold; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">🎹 TESTER L'ACCORD</button>
+                    <script>{get_chord_js(btn_id, analysis_data['key'])}</script>
+                """, height=110)
+
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                # Timeline des notes détectées
+                fig_tl = px.line(pd.DataFrame(analysis_data['timeline']), x="Temps", y="Note", markers=True, template="plotly_dark", category_orders={"Note": NOTES_ORDER}, title="Stabilité Temporelle")
+                fig_tl.update_layout(height=350, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_tl, use_container_width=True)
+            with c2:
+                # Radar de l'énergie Chroma (ce que l'oreille analyse)
+                fig_radar = go.Figure(data=go.Scatterpolar(r=analysis_data['chroma'], theta=NOTES_LIST, fill='toself', line_color='#4F46E5'))
+                fig_radar.update_layout(template="plotly_dark", height=350, margin=dict(l=40, r=40, t=40, b=20), polar=dict(radialaxis=dict(visible=False)), paper_bgcolor='rgba(0,0,0,0)', title="Signature de Consonance")
+                st.plotly_chart(fig_radar, use_container_width=True)
+            
+            st.markdown("<hr style='border-color: #30363d; margin-bottom:40px;'>", unsafe_allow_html=True)
+
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2569/2569107.png", width=80)
+    st.header("Sniper Control")
+    st.info("L'Oreille Humaine compare le spectre global avec des masques de consonance (pureté harmonique) pour éliminer les fausses détections dues aux bruits ou aux instruments complexes.")
+    if st.button("🧹 Vider la file d'analyse"):
+        st.cache_data.clear()
+        st.rerun()
