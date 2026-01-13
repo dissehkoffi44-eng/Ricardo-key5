@@ -46,7 +46,6 @@ PROFILES = {
 }
 
 # --- OREILLE HUMAINE : PROFIL DE CONSONANCE PURE ---
-# Ce profil privilégie la pureté des intervalles (1, 3, 5) pour simuler l'oreille
 HUMAN_CONSONANCE_MASK = {
     "major": [1.0, 0.05, 0.15, 0.05, 0.85, 0.4, 0.1, 0.95, 0.1, 0.25, 0.05, 0.15],
     "minor": [1.0, 0.1, 0.2, 0.9, 0.05, 0.45, 0.1, 0.95, 0.4, 0.15, 0.05, 0.1]
@@ -116,7 +115,8 @@ def solve_key_sniper(chroma_vector, bass_vector):
                     if cv[dom_idx] > 0.45 and cv[leading_tone] > 0.35:
                         score *= 1.35 
                 
-                if bv[i] > 0.6: score += (bv[i] * 0.2)
+                # Boost de la fondamentale (Basse accrue à 0.4)
+                if bv[i] > 0.6: score += (bv[i] * 0.4)
                 
                 fifth_idx = (i + 7) % 12
                 if cv[fifth_idx] > 0.5: score += 0.1
@@ -131,23 +131,33 @@ def solve_key_sniper(chroma_vector, bass_vector):
 
 def human_ear_arbitration(chroma_global, candidates):
     """
-    Simule une oreille humaine pour choisir la tonalité la plus 'consistante' et 'douce'.
-    Utilise le produit scalaire entre le spectre global et un masque de consonance pure.
+    UPGRADE : Analyse de consonance vs dissonance active.
+    L'oreille rejette les tonalités qui 'frottent' (pénalité de seconde mineure).
     """
     scores = {}
-    # Normalisation du chroma global
-    cg = (chroma_global - chroma_global.min()) / (chroma_global.max() - chroma_global.min() + 1e-6)
+    # On accentue les pics pour simuler une audition sélective
+    cg = np.power(chroma_global, 2)
+    cg = (cg - cg.min()) / (cg.max() - cg.min() + 1e-6)
     
     for cand in candidates:
         note, mode = cand.split()
         idx = NOTES_LIST.index(note)
-        # Création du masque décalé pour la note cible
+        
+        # Base de consonance pure (1, 3, 5)
         mask = np.roll(HUMAN_CONSONANCE_MASK[mode], idx)
-        # Calcul de la douceur (consonance perçue)
-        smoothness = np.dot(cg, mask)
+        
+        # AJOUT : Masque de pénalité de dissonance (Rugosité)
+        # La seconde mineure (+1 demi-ton) et la septième majeure (+11) sont pénalisées
+        penalties = np.zeros(12)
+        penalties[(idx + 1) % 12] = -0.6  # Très dissonant
+        penalties[(idx + 11) % 12] = -0.4 # Tension désagréable
+        
+        final_mask = mask + penalties
+        
+        # Produit scalaire de consonance perçue
+        smoothness = np.dot(cg, final_mask)
         scores[cand] = smoothness
         
-    # Retourne la clé avec le score de douceur maximal
     best_ear_key = max(scores, key=scores.get)
     return best_ear_key, scores
 
@@ -188,16 +198,14 @@ def process_audio(audio_file, file_name, progress_placeholder):
         p_val = 50 + int((i / len(segments)) * 40)
         update_prog(p_val, "Calcul chirurgical en cours")
 
-    update_prog(95, "Arbitrage Oreille Humaine")
+    update_prog(95, "Arbitrage Oreille Humaine (Consonance Active)")
     
-    # --- LOGIQUE DE L'OREILLE HUMAINE ---
     most_common = votes.most_common(2)
     chroma_global = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning), axis=1)
     
     cand_list = [m[0] for m in most_common]
     final_key, ear_scores = human_ear_arbitration(chroma_global, cand_list)
     
-    # On détecte une modulation si le second choix est fort OU si l'oreille a hésité
     mod_detected = len(most_common) > 1 and (votes[most_common[1][0]] / sum(votes.values())) > 0.25
     target_key = most_common[1][0] if final_key == most_common[0][0] else most_common[0][0]
     if not mod_detected: target_key = None
@@ -219,13 +227,10 @@ def process_audio(audio_file, file_name, progress_placeholder):
         "name": file_name
     }
     
-    # --- RAPPORT TELEGRAM ENRICHI ---
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
             now = datetime.now().strftime("%H:%M:%S")
             mod_text = f"\n⚠️ *MODULATION:* `{target_key.upper()}` ({res_obj['target_camelot']})" if mod_detected else ""
-            ear_text = f"\n🧠 *OREILLE HUMAINE:* `Validée` ✅"
-            
             caption = (
                 f"🎯 *SNIPER M3 - RAPPORT D'ANALYSE*\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
@@ -234,7 +239,7 @@ def process_audio(audio_file, file_name, progress_placeholder):
                 f"🎹 *TONALITÉ:* `{final_key.upper()}`\n"
                 f"🌀 *CAMELOT:* `{res_obj['camelot']}`\n"
                 f"🔥 *CONFIANCE:* `{res_obj['conf']}%`\n"
-                f"{ear_text}{mod_text}\n"
+                f"🧠 *OREILLE:* `Pureté Validée` ✅{mod_text}\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"⏱ *TEMPO:* `{res_obj['tempo']} BPM`\n"
                 f"🎸 *ACCORDAGE:* `{res_obj['tuning']} Hz`\n"
@@ -269,7 +274,7 @@ def get_chord_js(btn_id, key_str):
 
 # --- DASHBOARD PRINCIPAL ---
 st.title("🎯 RCDJ228 SNIPER M3")
-st.markdown("#### Système d'Analyse Harmonique Militaire | Human Ear Engine Integration")
+st.markdown("#### Système d'Analyse Harmonique Militaire | Human Ear Engine Upgrade")
 
 uploaded_files = st.file_uploader("📥 Déposez vos fichiers (Audio)", type=['mp3','wav','flac','m4a'], accept_multiple_files=True)
 
@@ -285,10 +290,10 @@ if uploaded_files:
             
             st.markdown(f"""
                 <div class="report-card" style="background:{color};">
-                    <p style="letter-spacing:5px; opacity:0.8; font-size:0.8em;">SNIPER ENGINE v5.5 <span class="sniper-badge">HUMAN EAR ACTIVE</span></p>
+                    <p style="letter-spacing:5px; opacity:0.8; font-size:0.8em;">SNIPER ENGINE v6.0 <span class="sniper-badge">DISSONANCE SHIELD ACTIVE</span></p>
                     <h1 style="font-size:5.5em; margin:10px 0; font-weight:900;">{analysis_data['key'].upper()}</h1>
                     <p style="font-size:1.5em; opacity:0.9;">CAMELOT: <b>{analysis_data['camelot']}</b> &nbsp; | &nbsp; CONFIANCE: <b>{analysis_data['conf']}%</b></p>
-                    <div class="ear-badge">🧠 Arbitrage Oreille : Consonance Maximale Détectée</div>
+                    <div class="ear-badge">🧠 Arbitrage Oreille : Pureté Harmonique Maximale</div>
                     {f"<div class='modulation-alert'>⚠️ MODULATION DÉTECTÉE : {analysis_data['target_key'].upper()} ({analysis_data['target_camelot']})</div>" if analysis_data['modulation'] else ""}
                 </div>
             """, unsafe_allow_html=True)
@@ -305,12 +310,10 @@ if uploaded_files:
 
             c1, c2 = st.columns([2, 1])
             with c1:
-                # Timeline des notes détectées
                 fig_tl = px.line(pd.DataFrame(analysis_data['timeline']), x="Temps", y="Note", markers=True, template="plotly_dark", category_orders={"Note": NOTES_ORDER}, title="Stabilité Temporelle")
                 fig_tl.update_layout(height=350, margin=dict(l=0, r=0, t=40, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig_tl, use_container_width=True)
             with c2:
-                # Radar de l'énergie Chroma (ce que l'oreille analyse)
                 fig_radar = go.Figure(data=go.Scatterpolar(r=analysis_data['chroma'], theta=NOTES_LIST, fill='toself', line_color='#4F46E5'))
                 fig_radar.update_layout(template="plotly_dark", height=350, margin=dict(l=40, r=40, t=40, b=20), polar=dict(radialaxis=dict(visible=False)), paper_bgcolor='rgba(0,0,0,0)', title="Signature de Consonance")
                 st.plotly_chart(fig_radar, use_container_width=True)
@@ -320,7 +323,7 @@ if uploaded_files:
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2569/2569107.png", width=80)
     st.header("Sniper Control")
-    st.info("L'Oreille Humaine compare le spectre global avec des masques de consonance (pureté harmonique) pour éliminer les fausses détections dues aux bruits ou aux instruments complexes.")
+    st.info("Version 6.0 : Intègre désormais le 'Dissonance Shield' qui pénalise les frottements harmoniques détectés par l'oreille humaine pour une précision chirurgicale.")
     if st.button("🧹 Vider la file d'analyse"):
         st.cache_data.clear()
         st.rerun()
