@@ -10,10 +10,9 @@ import gc
 import scipy.ndimage
 from scipy.signal import butter, lfilter
 import requests
-import streamlit.components.v1 as components
 
 # --- CONFIGURATION SYSTÈME ---
-st.set_page_config(page_title="L'Elite V7 - Piano Validator", page_icon="🎹", layout="wide")
+st.set_page_config(page_title="L'Elite", page_icon="🎵", layout="wide")
 
 # --- GESTION DES SECRETS ---
 TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN")
@@ -28,52 +27,18 @@ CAMELOT_MAP = {
     'F# minor': '11A', 'G minor': '6A', 'G# minor': '1A', 'A minor': '8A', 'A# minor': '3A', 'B minor': '10A'
 }
 
-# --- PIANO SIMULATOR (JAVASCRIPT) ---
-def get_piano_js(btn_id, key_str):
-    """Génère un son de piano riche (fondamentale + harmoniques) avec enveloppe ADSR."""
-    root_note, mode = key_str.split()
-    is_minor = "true" if mode == "minor" else "false"
+# --- FONCTIONS UTILITAIRES ---
+def get_chord_intervals(key_name):
+    """Retourne les indices des notes composant l'accord (Fondamentale, Tierce, Quinte)."""
+    parts = key_name.split()
+    root_note = parts[0]
+    mode = parts[1]
+    root_idx = NOTES.index(root_note)
     
-    return f"""
-    <script>
-    document.getElementById('{btn_id}').onclick = function() {{
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const notesFreq = {{
-            'C': 261.63, 'C#': 277.18, 'D': 293.66, 'D#': 311.13, 'E': 329.63, 
-            'F': 349.23, 'F#': 369.99, 'G': 392.00, 'G#': 415.30, 'A': 440.00, 
-            'A#': 466.16, 'B': 493.88
-        }};
-        
-        const intervals = {is_minor} ? [0, 3, 7, 12] : [0, 4, 7, 12];
-        const baseFreq = notesFreq['{root_note}'];
-
-        intervals.forEach((interval, idx) => {{
-            const f = baseFreq * Math.pow(2, interval/12);
-            playPianoNote(audioCtx, f, audioCtx.currentTime + (idx * 0.02));
-        }});
-
-        function playPianoNote(ctx, freq, startTime) {{
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            
-            // Simulation du timbre (harmoniques de piano)
-            osc.type = 'triangle'; 
-            osc.frequency.setValueAtTime(freq, startTime);
-            
-            // Enveloppe Piano (Attaque rapide, Decay lent)
-            gain.gain.setValueAtTime(0, startTime);
-            gain.gain.linearRampToValueAtTime(0.2, startTime + 0.05);
-            gain.gain.exponentialRampToValueAtTime(0.001, startTime + 2.5);
-            
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            
-            osc.start(startTime);
-            osc.stop(startTime + 2.5);
-        }}
-    }};
-    </script>
-    """
+    if mode == "major":
+        return [root_idx, (root_idx + 4) % 12, (root_idx + 7) % 12]
+    else:
+        return [root_idx, (root_idx + 3) % 12, (root_idx + 7) % 12]
 
 # --- GÉNÉRATION DE TEMPLATES ---
 @st.cache_resource
@@ -116,6 +81,34 @@ def signature_of_fifths_key(chroma_avg):
     mode = "major" if chroma_avg[third_maj] > chroma_avg[third_min] else "minor"
     return f"{NOTES[best_root]} {mode}", np.max(sig)
 
+# --- FONCTION D'ENVOI TELEGRAM ---
+def send_telegram_expert(data, fig_timeline, fig_radar):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+
+    msg = (f" *L'Elite*\n"
+           f"━━━━━━━━━━━━━━━━━━━━\n"
+           f" *Fichier:* `{data['name']}`\n\n"
+           f" *TONALITÉ PRINCIPALE*\n"
+           f"└ Note : `{data['key'].upper()}`\n"
+           f"└ Camelot : `{data['camelot']}`\n\n"
+           f" *MÉTRIQUES*\n"
+           f"└ Tempo : `{data['tempo']} BPM`\n"
+           f"└ Tuning : `{data['tuning']} Hz`\n"
+           f"━━━━━━━━━━━━━━━━━━━━")
+
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                      json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+        
+        for fig, title in [(fig_timeline, "Flux Harmonique"), (fig_radar, "Signature Spectrale")]:
+            img_bytes = fig.to_image(format="png", engine="kaleido")
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", 
+                          data={"chat_id": CHAT_ID, "caption": f" {title} - {data['name']}"},
+                          files={"photo": img_bytes})
+    except Exception as e:
+        st.error(f"Erreur Telegram: {e}")
+
 # --- MOTEUR DE TRAITEMENT V3 ---
 def apply_2026_filters(y, sr):
     y = librosa.effects.preemphasis(y)
@@ -134,6 +127,7 @@ def multi_chroma_fusion(y, sr, tuning):
 
 def analyze_engine_v3(file_object, file_name):
     y, sr = librosa.load(file_object, sr=22050)
+    
     tuning = librosa.estimate_tuning(y=y, sr=sr, bins_per_octave=72)
     y_clean = apply_2026_filters(y, sr)
     chroma_fused = multi_chroma_fusion(y_clean, sr, tuning)
@@ -143,27 +137,48 @@ def analyze_engine_v3(file_object, file_name):
     results_stream = []
     templates = generate_real_templates(sr=sr)
     
+    # Seuil de présence pour validation (0.0 à 1.0)
+    presence_threshold = 0.35 
+
     for i in range(len(steps)-1):
         segment = chroma_fused[:, steps[i]:steps[i+1]]
         avg_chroma = np.mean(segment, axis=1)
+        
+        # Normalisation pour corrélation
         avg_chroma_norm = (avg_chroma - np.mean(avg_chroma)) / (np.std(avg_chroma) + 1e-8)
+        # Normalisation 0-1 pour vérification de présence
+        norm_presence = (avg_chroma - np.min(avg_chroma)) / (np.max(avg_chroma) - np.min(avg_chroma) + 1e-8)
         
         best_score = -1
         best_key = "Ambiguous"
         
         for key, temp in templates.items():
+            # 1. Calcul de base (corrélation)
             score = np.corrcoef(avg_chroma_norm, temp)[0, 1]
-            root_idx = NOTES.index(key.split()[0])
-            if np.argmax(avg_chroma) == root_idx:
-                score *= 1.2 
+            
+            # 2. VÉRIFICATION DE COMPOSITION
+            required_notes = get_chord_intervals(key)
+            presence_values = [norm_presence[idx] for idx in required_notes]
+            all_present = all(p > presence_threshold for p in presence_values)
+            
+            # 3. SYSTÈME DE PÉNALITÉ / RÉCOMPENSE
+            if all_present:
+                score *= 1.3  # Bonus de cohérence
+            else:
+                score *= 0.4  # Pénalité majeure si une note de l'accord manque
+            
+            # Bonus fondamentale
+            if np.argmax(avg_chroma) == required_notes[0]:
+                score *= 1.1
             
             if score > best_score:
                 best_score = score
                 best_key = key
         
+        # Optionnel : Recoupement avec le cycle des quintes (SOF)
         sof_key, sof_score = signature_of_fifths_key(avg_chroma)
-        if sof_score > best_score * 0.9:
-            best_key = sof_key
+        if sof_score > best_score * 0.95:
+             best_key = sof_key
         
         results_stream.append({"time": (steps[i]/chroma_fused.shape[1])*duration, "key": best_key, "score": best_score})
 
@@ -181,14 +196,14 @@ def analyze_engine_v3(file_object, file_name):
     }
 
 # --- INTERFACE ---
-st.title("🎹 L'Elite V7 - Sniper & Piano Validator")
+st.title("🛡️ L'Elite")
 
 with st.sidebar:
-    st.header("Configuration")
+    st.header("⚙️ Configuration")
     if TELEGRAM_TOKEN and CHAT_ID:
         st.success("Telegram Secret : OK")
     else:
-        st.warning("Telegram Secret : MANQUANT")
+        st.error("Telegram Secret : MANQUANT")
     
     if st.button("Reset Cache"):
         st.cache_data.clear()
@@ -198,40 +213,33 @@ files = st.file_uploader("Upload Audio", type=['mp3','wav','flac'], accept_multi
 
 if files:
     for f in reversed(files):
-        with st.spinner(f"Analyse en cours : {f.name}"):
+        with st.spinner(f"Analyse Deep Fusion & Composition Check : {f.name}"):
             data = analyze_engine_v3(f, f.name)
             
         with st.expander(f"📊 {data['name']}", expanded=True):
-            col1, col2, col3 = st.columns([1.5, 2, 1.5])
+            col1, col2 = st.columns([1, 2])
             
             with col1:
                 st.markdown(f"""
-                    <div style="background:#1e293b; padding:20px; border-radius:15px; border-left: 5px solid #3b82f6; text-align:center;">
+                    <div style="background:#1e293b; padding:20px; border-radius:15px; border-left: 5px solid #3b82f6;">
                         <h2 style="color:#60a5fa; margin:0;">{data['key'].upper()}</h2>
-                        <h1 style="font-size:4em; margin:0; color: white;">{data['camelot']}</h1>
+                        <h1 style="font-size:3em; margin:0; color: white;">{data['camelot']}</h1>
                         <p style="color: white; opacity: 0.9; margin:0;">{data['tempo']} BPM | {data['tuning']} Hz</p>
                     </div>
                 """, unsafe_allow_html=True)
                 
-                # SECTION VALIDATION PIANO
-                btn_id = f"piano_{hash(data['name'])}"
-                st.markdown("<br>", unsafe_allow_html=True)
-                components.html(f"""
-                    <button id="{btn_id}" style="width:100%; height:60px; background: linear-gradient(135deg, #3b82f6, #2563eb); color:white; border:none; border-radius:10px; cursor:pointer; font-weight:bold; font-size:16px; box-shadow: 0 4px 15px rgba(0,0,0,0.3);">
-                        🔊 JOUER L'ACCORD PIANO
-                    </button>
-                    {get_piano_js(btn_id, data['key'])}
-                """, height=80)
+                fig_polar = go.Figure(data=go.Scatterpolar(r=data['chroma_avg'], theta=NOTES, fill='toself', line_color='#60a5fa'))
+                fig_polar.update_layout(template="plotly_dark", height=300, margin=dict(l=20, r=20, t=20, b=20))
+                st.plotly_chart(fig_polar, use_container_width=True)
 
             with col2:
                 df_timeline = pd.DataFrame(data['timeline'])
-                fig_line = px.line(df_timeline, x="time", y="key", title="Stabilité Harmonique",
+                fig_line = px.line(df_timeline, x="time", y="key", title="Stabilité Harmonique (Validée)",
                                    markers=True, template="plotly_dark", color_discrete_sequence=["#3b82f6"])
                 st.plotly_chart(fig_line, use_container_width=True)
 
-            with col3:
-                fig_polar = go.Figure(data=go.Scatterpolar(r=data['chroma_avg'], theta=NOTES, fill='toself', line_color='#60a5fa'))
-                fig_polar.update_layout(template="plotly_dark", height=300, margin=dict(l=40, r=40, t=20, b=20), polar=dict(radialaxis=dict(visible=False)))
-                st.plotly_chart(fig_polar, use_container_width=True)
-
+            if TELEGRAM_TOKEN and CHAT_ID:
+                send_telegram_expert(data, fig_line, fig_polar)
+                st.toast(f"Rapport envoyé pour {data['name']}")
+        
         gc.collect()
