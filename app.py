@@ -165,7 +165,46 @@ def process_audio(file_bytes, file_name, sr_target=22050):
         final_results[key] = (global_scores[key] * WEIGHTS["profiles_global"]) + (segment_votes_norm.get(key, 0) * WEIGHTS["segments"])
 
     best_key, best_score = final_results.most_common(1)[0]
-    
+
+    # ─── POST-PROCESSING : détection ambiguïté quinte / relative ───
+    top_keys = final_results.most_common(6)
+
+    if len(top_keys) >= 2:
+        best_key_tuple, second_key_tuple = top_keys[0], top_keys[1]
+        best_key, best_sc = best_key_tuple
+        second_key, second_sc = second_key_tuple
+        
+        root1 = NOTES_LIST.index(best_key.split()[0])
+        root2 = NOTES_LIST.index(second_key.split()[0])
+        mode1 = best_key.split()[1]
+        mode2 = second_key.split()[1]
+        
+        diff_semitones = (root2 - root1) % 12
+        
+        # Cas 1 : quinte ascendante (souvent la dominante prise pour tonique)
+        if diff_semitones == 7 and mode1 == "minor" and mode2 == "minor":
+            if (root1 + 7) % 12 == root2:
+                st.warning(
+                    f"**Cas dominant/tonic ambigu** : `{best_key}` ({CAMELOT_MAP.get(best_key)}) très fort, "
+                    f"mais `{second_key}` ({CAMELOT_MAP.get(second_key)}) pourrait être la vraie tonique perçue "
+                    f"(basse centrée sur la quinte). Vérifiez la résolution à la fin du morceau."
+                )
+                # Option : forcer le switch si le second score est suffisamment proche
+                if second_sc > 0.68 * best_sc:
+                    best_key = second_key
+                    best_score = second_sc  # on prend directement le second
+
+        # Cas 2 : relative major/minor confusion
+        if mode1 != mode2:
+            relative_diff = 3 if mode1 == "minor" else -3  # relative major = +3 demi-tons
+            if (root1 + relative_diff) % 12 == root2:
+                st.info(
+                    f"**Relative possible** : `{best_key}` vs `{second_key}`. "
+                    f"Dans les styles mélancoliques ou électroniques, la version mineure est souvent préférée même si "
+                    f"la version majeure score haut."
+                )
+
+    # Retour des données (on renvoie la version potentiellement corrigée)
     return {
         "key": best_key, 
         "camelot": CAMELOT_MAP.get(best_key, "??"),
