@@ -9,7 +9,7 @@ from collections import Counter
 from scipy.signal import butter, lfilter
 
 # Configuration de la page
-st.set_page_config(page_title="Music Key Detector - List Mode", page_icon="🎵", layout="wide")
+st.set_page_config(page_title="Music Key Detector - Auto-Send", page_icon="🎵", layout="wide")
 
 # ────────────────────────────────────────────────
 # CONSTANTES & PROFILS
@@ -44,11 +44,7 @@ CAMELOT_MAP = {
     'G# minor': '1A', 'A minor': '8A', 'A# minor': '3A', 'B minor': '10A'
 }
 
-# ─── NOUVELLE PONDÉRATION DEMANDÉE ───
-WEIGHTS = {
-    "profiles_global": 0.70,
-    "segments": 0.30
-}
+WEIGHTS = {"profiles_global": 0.70, "segments": 0.30}
 
 # ────────────────────────────────────────────────
 # FONCTIONS TECHNIQUES
@@ -65,11 +61,19 @@ def apply_precision_filters(y, sr):
     b, a = butter(4, [60/nyq, 5000/nyq], btype='band')
     return lfilter(b, a, y_harm)
 
+def send_telegram_auto(msg, bot_token, chat_id):
+    if bot_token and chat_id:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}
+        try:
+            requests.post(url, data=payload, timeout=10)
+        except:
+            pass
+
 def vote_profiles(chroma_vector, bass_vector):
     cv = (chroma_vector - chroma_vector.min()) / (chroma_vector.max() - chroma_vector.min() + 1e-8)
     bv = (bass_vector - bass_vector.min()) / (bass_vector.max() - bass_vector.min() + 1e-8)
     scores = {f"{n} {m}": 0.0 for n in NOTES_LIST for m in ["major", "minor"]}
-
     for p_data in PROFILES.values():
         for mode in ["major", "minor"]:
             for i in range(12):
@@ -79,7 +83,7 @@ def vote_profiles(chroma_vector, bass_vector):
     return scores
 
 # ────────────────────────────────────────────────
-# CŒUR DU TRAITEMENT
+# TRAITEMENT
 # ────────────────────────────────────────────────
 
 def process_audio(file_bytes, file_name, sr_target=22050):
@@ -93,12 +97,12 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     tuning = librosa.estimate_tuning(y=y, sr=sr)
     y_filt = apply_precision_filters(y, sr)
 
-    # 1. ANALYSE GLOBALE (70%)
+    # 1. GLOBAL (70%)
     chroma_glob = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning), axis=1)
     bass_glob = np.mean(librosa.feature.chroma_cqt(y=butter_lowpass(y, sr), sr=sr), axis=1)
     global_scores = vote_profiles(chroma_glob, bass_glob)
 
-    # 2. ANALYSE PAR SEGMENTS (30%) - 12s / 6s overlap
+    # 2. SEGMENTS (30%) - 12s / 6s overlap
     seg_size, overlap = 12, 6
     step = seg_size - overlap
     segment_votes = Counter()
@@ -107,24 +111,21 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     for start_s in range(0, int(duration) - seg_size, step):
         y_seg = y_filt[int(start_s * sr) : int((start_s + seg_size) * sr)]
         if np.max(np.abs(y_seg)) < 0.02: continue
-
+        
         c_seg = np.mean(librosa.feature.chroma_cqt(y=y_seg, sr=sr, tuning=tuning), axis=1)
         b_seg = np.mean(librosa.feature.chroma_cqt(y=butter_lowpass(y_seg, sr), sr=sr), axis=1)
         
         seg_scores = vote_profiles(c_seg, b_seg)
-        best_key_seg = max(seg_scores, key=seg_scores.get)
-        
-        # Seuil de rigueur 80%
-        if seg_scores[best_key_seg] >= 0.80:
+        best_k = max(seg_scores, key=seg_scores.get)
+        if seg_scores[best_k] >= 0.80:
             weight = 1.3 if 0.25 < (start_s / duration) < 0.75 else 1.0
-            segment_votes[best_key_seg] += seg_scores[best_key_seg] * weight
+            segment_votes[best_k] += seg_scores[best_k] * weight
             valid_count += 1
 
     if segment_votes:
         total_v = sum(segment_votes.values())
         segment_votes = {k: v / total_v for k, v in segment_votes.items()}
 
-    # VOTE FINAL
     final_results = Counter()
     for key in global_scores:
         final_results[key] = (global_scores[key] * WEIGHTS["profiles_global"]) + (segment_votes.get(key, 0) * WEIGHTS["segments"])
@@ -132,78 +133,63 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     best_key, best_score = final_results.most_common(1)[0]
     
     return {
-        "key": best_key,
-        "camelot": CAMELOT_MAP.get(best_key, "??"),
-        "conf": best_score,
-        "valid_seg": valid_count,
-        "duration": duration
+        "key": best_key, "camelot": CAMELOT_MAP.get(best_key, "??"),
+        "conf": best_score, "valid_seg": valid_count, "duration": duration, "tuning": tuning
     }
 
 # ────────────────────────────────────────────────
-# INTERFACE UTILISATEUR (MODE LISTE)
+# INTERFACE
 # ────────────────────────────────────────────────
 
-st.title("🎵 Music Key List Detector")
-st.markdown(f"**Poids : Global {WEIGHTS['profiles_global']*100:.0f}% / Segments {WEIGHTS['segments']*100:.0f}%** | Segments: 12s (Overlap 6s)")
+st.title("🎵 Key Detector - Automatic Mode")
 
-# Secrets Telegram
-try:
-    bot_token = st.secrets["TELEGRAM_BOT_TOKEN"]
-    chat_id   = st.secrets["TELEGRAM_CHAT_ID"]
-    secrets_ok = True
-except:
-    secrets_ok = False
+# Récupération secrets
+bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN")
+chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
 
-uploaded_files = st.file_uploader("Envoyez vos morceaux", type=["mp3", "wav", "m4a"], accept_multiple_files=True)
+if not bot_token or not chat_id:
+    st.warning("Secrets Telegram manquants. L'envoi automatique est désactivé.")
+
+uploaded_files = st.file_uploader("Audios", type=["mp3", "wav", "m4a"], accept_multiple_files=True)
 
 if uploaded_files:
     results_list = []
-    
-    # Barre de progression globale
     prog_bar = st.progress(0)
-    status_msg = st.empty()
+    status_txt = st.empty()
 
     for i, file in enumerate(uploaded_files, 1):
-        status_msg.write(f"Analyse de {file.name}...")
+        status_txt.write(f"Analyse & Envoi : {file.name}...")
         data = process_audio(file.getvalue(), file.name)
         
-        if "error" in data:
-            st.error(f"Erreur sur {file.name}")
-        else:
+        if "error" not in data:
             data['name'] = file.name
             results_list.append(data)
-        
+            
+            # --- ENVOI AUTOMATIQUE TELEGRAM ---
+            report = (f"✅ *{file.name}*\n"
+                      f"Tonalité : `{data['key']}`\n"
+                      f"Camelot : *{data['camelot']}*\n"
+                      f"Confiance : {data['conf']:.3f}\n"
+                      f"Segments validés : {data['valid_seg']}")
+            send_telegram_auto(report, bot_token, chat_id)
+            # ----------------------------------
+            
         prog_bar.progress(i / len(uploaded_files))
 
-    status_msg.success(f"Analyse terminée pour {len(results_list)} fichier(s).")
+    status_txt.success(f"Terminé : {len(results_list)} fichiers analysés et envoyés.")
 
-    # AFFICHAGE SOUS FORME DE LISTE
+    # AFFICHAGE LISTE
     st.markdown("---")
     for item in results_list:
         with st.container():
-            # Création d'une ligne de type "Liste"
-            c1, c2, c3, c4, c5 = st.columns([3, 1.5, 1, 1, 1.5])
-            
+            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
             with c1:
                 st.markdown(f"**{item['name']}**")
-                st.caption(f"Durée: {int(item['duration']//60)}m {int(item['duration']%60)}s | Segments valides: {item['valid_seg']}")
-            
+                st.caption(f"Tuning: {item['tuning']:+.2f} | {int(item['duration']//60)}m {int(item['duration']%60)}s")
             with c2:
-                st.markdown(f"<span style='font-size:1.5em; color:#f59e0b; font-weight:bold;'>{item['camelot']}</span>", unsafe_allow_html=True)
-            
+                st.markdown(f"<h2 style='color:#f59e0b; margin:0;'>{item['camelot']}</h2>", unsafe_allow_html=True)
             with c3:
-                st.markdown(f"`{item['key']}`")
-            
+                st.markdown(f"**{item['key']}**")
             with c4:
-                color = "green" if item['conf'] > 0.7 else "orange"
-                st.markdown(f"<span style='color:{color}'>{item['conf']:.3f}</span>", unsafe_allow_html=True)
-            
-            with c5:
-                if secrets_ok:
-                    if st.button("Telegram", key=f"tg_{item['name']}"):
-                        msg = f"🎵 *{item['name']}*\nResult: {item['key']} ({item['camelot']})\nConf: {item['conf']:.3f}"
-                        requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", 
-                                      data={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
-                        st.toast("Envoyé !")
-            
+                st.metric("Confiance", f"{item['conf']:.3f}")
             st.divider()
