@@ -47,9 +47,9 @@ CAMELOT_MAP = {
 
 # Poids des différentes sources de vote (somme = 1.0)
 WEIGHTS = {
-    "profiles_global": 0.35,     # profils sur chroma globale
-    "segments":        0.40,     # analyse segmentée
-    "perception":      0.25      # simulation accords piano
+    "profiles_global": 0.35,
+    "segments":        0.40,
+    "perception":      0.25
 }
 
 # ────────────────────────────────────────────────
@@ -62,7 +62,6 @@ def butter_lowpass(y, sr, cutoff=180, order=4):
     b, a = butter(order, normal_cutoff, btype='low', analog=False)
     return lfilter(b, a, y)
 
-
 def apply_sniper_filters(y, sr):
     y_harm = librosa.effects.harmonic(y, margin=8.0)
     nyq = 0.5 * sr
@@ -71,12 +70,10 @@ def apply_sniper_filters(y, sr):
     b, a = butter(4, [low, high], btype='band')
     return lfilter(b, a, y_harm)
 
-
 def get_bass_priority(y, sr):
     y_bass = butter_lowpass(y, sr, cutoff=150)
     chroma_bass = librosa.feature.chroma_cqt(y=y_bass, sr=sr, n_chroma=12)
     return np.mean(chroma_bass, axis=1)
-
 
 # ────────────────────────────────────────────────
 # VOTING DES PROFILS (ensemble)
@@ -115,7 +112,6 @@ def vote_profiles(chroma_vector, bass_vector):
                 profile_scores[f"{NOTES_LIST[i]} {mode}"] += score / len(PROFILES)
 
     return profile_scores
-
 
 # ────────────────────────────────────────────────
 # SIMULATION ACCORD PIANO & PERCEPTION
@@ -165,7 +161,6 @@ def generate_piano_chord_audio(key_str, sr=22050, duration=2.0):
     buf.seek(0)
     return buf.read(), y
 
-
 def simulate_ear_perception(chord_y, song_y, sr, chroma_song):
     stft_chord = np.abs(librosa.stft(chord_y))
     freqs = librosa.fft_frequencies(sr=sr)
@@ -189,7 +184,6 @@ def simulate_ear_perception(chord_y, song_y, sr, chroma_song):
 
     similarity = np.corrcoef(chroma_song, chroma_chord_avg)[0, 1]
     return 0.60 * similarity + 0.40 * consonance
-
 
 # ────────────────────────────────────────────────
 # TRAITEMENT PRINCIPAL D'UN FICHIER
@@ -248,9 +242,17 @@ def process_audio(file_bytes, file_name, sr_target=22050):
         chroma_seg = np.mean(librosa.feature.chroma_cqt(y=y_seg, sr=sr, tuning=tuning, hop_length=512), axis=1)
         bass_seg = get_bass_priority(y[start:end], sr)
 
-        seg_res = solve_key_sniper(chroma_seg, bass_seg)
+        # Correction ici : on utilise vote_profiles au lieu de solve_key_sniper
+        seg_profile_scores = vote_profiles(chroma_seg, bass_seg)
+
+        if seg_profile_scores:
+            best_seg_key = max(seg_profile_scores, key=seg_profile_scores.get)
+            seg_score = seg_profile_scores[best_seg_key]
+        else:
+            continue
+
         weight = 1.5 if 0.3 < (start_sec / duration) < 0.7 else 0.8
-        segment_votes[seg_res["key"]] += seg_res["score"] * weight
+        segment_votes[best_seg_key] += seg_score * weight
 
     # Normalisation votes segments
     if segment_votes:
@@ -258,7 +260,6 @@ def process_audio(file_bytes, file_name, sr_target=22050):
         segment_votes = {k: v / total_seg for k, v in segment_votes.items()}
 
     # ─── VOTE 3 : perception (simulation accords) ────────────────
-    # On teste les top 4 du vote global + segmenté combiné
     combined_votes = Counter()
     for key, score in global_profile_votes.items():
         combined_votes[key] += score * 0.6
@@ -324,9 +325,8 @@ Scores perception (normalisés) :
         "conf": final_conf,
         "audio_bytes": best_audio,
         "report": report,
-        "adjusted": best_key not in [best_key]  # placeholder, peut être amélioré
+        "adjusted": False  # placeholder
     }
-
 
 # ────────────────────────────────────────────────
 # INTERFACE
@@ -382,7 +382,8 @@ if uploaded_files:
                 with colB:
                     st.metric("Confiance", f"{data['conf']:.3f}")
 
-                st.audio(data["audio_bytes"], format="audio/wav")
+                if data.get("audio_bytes"):
+                    st.audio(data["audio_bytes"], format="audio/wav")
                 st.text_area("Rapport complet", data["report"], height=420)
 
                 if secrets_ok:
