@@ -10,7 +10,7 @@ from scipy.signal import butter, lfilter
 import gc
 
 # Configuration de la page
-st.set_page_config(page_title="Music Key Detector - Modulation Support", page_icon="🎵", layout="wide")
+st.set_page_config(page_title="Music Key Expert", page_icon="🎵", layout="wide")
 
 # --- FORCE FFMPEG PATH (Optionnel) ---
 if os.path.exists(r'C:\ffmpeg\bin'):
