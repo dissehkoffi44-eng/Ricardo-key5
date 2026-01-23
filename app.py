@@ -6,10 +6,9 @@ import os
 from pydub import AudioSegment
 import io
 from collections import Counter
-
-# Import CORRECT pour butter et lfilter (c'était la source de l'erreur)
 from scipy.signal import butter, lfilter
 
+# Configuration de la page
 st.set_page_config(page_title="Music Key & Camelot Detector", page_icon="🎵", layout="wide")
 
 # ────────────────────────────────────────────────
@@ -45,10 +44,11 @@ CAMELOT_MAP = {
     'G# minor': '1A', 'A minor': '8A', 'A# minor': '3A', 'B minor': '10A'
 }
 
-# Poids des différentes sources de vote (somme = 1.0)
+# ─── NOUVELLE PONDÉRATION ───
+# Priorité au global (65%) pour une meilleure stabilité structurelle
 WEIGHTS = {
-    "profiles_global": 0.42,
-    "segments":        0.58
+    "profiles_global": 0.65,
+    "segments": 0.35
 }
 
 # ────────────────────────────────────────────────
@@ -75,10 +75,11 @@ def get_bass_priority(y, sr):
     return np.mean(chroma_bass, axis=1)
 
 # ────────────────────────────────────────────────
-# VOTING DES PROFILS (ensemble)
+# VOTING DES PROFILS
 # ────────────────────────────────────────────────
 
 def vote_profiles(chroma_vector, bass_vector):
+    # Normalisation Min-Max
     cv = (chroma_vector - chroma_vector.min()) / (chroma_vector.max() - chroma_vector.min() + 1e-8)
     bv = (bass_vector - bass_vector.min()) / (bass_vector.max() - bass_vector.min() + 1e-8)
 
@@ -87,16 +88,20 @@ def vote_profiles(chroma_vector, bass_vector):
     for p_name, p_data in PROFILES.items():
         for mode in ["major", "minor"]:
             for i in range(12):
+                # Corrélation avec le profil décalé
                 score = np.corrcoef(cv, np.roll(p_data[mode], i))[0, 1]
 
+                # Renforcement des caractéristiques mineures (Dominante & Sensible)
                 if mode == "minor":
                     dom_idx, leading_idx = (i + 7) % 12, (i + 11) % 12
                     if cv[dom_idx] > 0.42 and cv[leading_idx] > 0.32:
                         score *= 1.18
 
+                # Bonus si la fondamentale est présente en basse
                 if bv[i] > 0.58:
                     score += bv[i] * 0.42
 
+                # Bonus Quintes et Tierces
                 fifth_idx = (i + 7) % 12
                 if cv[fifth_idx] > 0.48:
                     score += 0.14
@@ -105,6 +110,7 @@ def vote_profiles(chroma_vector, bass_vector):
                 if cv[third_idx] > 0.46:
                     score += 0.10
 
+                # Poids Fondamentale
                 if cv[i] > 0.52:
                     score += 0.48
 
@@ -113,7 +119,7 @@ def vote_profiles(chroma_vector, bass_vector):
     return profile_scores
 
 # ────────────────────────────────────────────────
-# TRAITEMENT PRINCIPAL D'UN FICHIER
+# TRAITEMENT PRINCIPAL
 # ────────────────────────────────────────────────
 
 def process_audio(file_bytes, file_name, sr_target=22050):
@@ -146,10 +152,10 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     chroma_global = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning, hop_length=512), axis=1)
     bass_global = get_bass_priority(y, sr)
 
-    # ─── VOTE 1 : profils sur global ─────────────────────────────
+    # ─── VOTE 1 : GLOBAL (65%) ───
     global_profile_votes = vote_profiles(chroma_global, bass_global)
 
-    # ─── VOTE 2 : analyse segmentée ──────────────────────────────
+    # ─── VOTE 2 : SEGMENTÉ (35%) ───
     segment_len_sec = max(10, min(30, duration / 8))
     num_segments = int(duration / segment_len_sec) + 1
     segment_votes = Counter()
@@ -157,38 +163,36 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     for seg in range(num_segments):
         start_sec = seg * segment_len_sec
         end_sec = min((seg + 1) * segment_len_sec, duration)
-        if end_sec - start_sec < 5:
-            continue
+        if end_sec - start_sec < 5: continue
 
         start = int(start_sec * sr)
         end = int(end_sec * sr)
         y_seg = y_filt[start:end]
-        if len(y_seg) < sr * 5 or np.max(np.abs(y_seg)) < 0.01:
-            continue
+        
+        if len(y_seg) < sr * 5 or np.max(np.abs(y_seg)) < 0.01: continue
 
         chroma_seg = np.mean(librosa.feature.chroma_cqt(y=y_seg, sr=sr, tuning=tuning, hop_length=512), axis=1)
         bass_seg = get_bass_priority(y[start:end], sr)
 
         seg_profile_scores = vote_profiles(chroma_seg, bass_seg)
-
         if seg_profile_scores:
             best_seg_key = max(seg_profile_scores, key=seg_profile_scores.get)
             seg_score = seg_profile_scores[best_seg_key]
-        else:
-            continue
-
-        weight = 1.5 if 0.3 < (start_sec / duration) < 0.7 else 0.8
-        segment_votes[best_seg_key] += seg_score * weight
+            
+            # Bonus pour le milieu du morceau (souvent plus représentatif)
+            weight = 1.4 if 0.25 < (start_sec / duration) < 0.75 else 0.8
+            segment_votes[best_seg_key] += seg_score * weight
 
     # Normalisation votes segments
     if segment_votes:
         total_seg = sum(segment_votes.values())
         segment_votes = {k: v / total_seg for k, v in segment_votes.items()}
 
-    # ─── VOTE FINAL pondéré ──────────────────────────────────────
+    # ─── VOTE FINAL COMBINÉ ───
     final_votes = Counter()
+    all_keys = set(list(global_profile_votes.keys()) + list(segment_votes.keys()))
 
-    for key in set(list(global_profile_votes.keys()) + list(segment_votes.keys())):
+    for key in all_keys:
         score = 0.0
         score += global_profile_votes.get(key, 0.0) * WEIGHTS["profiles_global"]
         score += segment_votes.get(key, 0.0) * WEIGHTS["segments"]
@@ -200,103 +204,82 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     best_key = final_votes.most_common(1)[0][0]
     final_conf = final_votes[best_key]
 
-    report = f"""Analyse terminée
+    # Rapport
+    report = f"""ANALYSE STRUCTURELLE
 ──────────────────────────────
-Fichier       : {file_name}
-Durée         : {int(duration // 60):02d}:{int(duration % 60):02d}
-Fréquence     : {sr} Hz
-Tuning est.   : {tuning:+.2f} cents
+Fichier    : {file_name}
+Durée      : {int(duration // 60):02d}:{int(duration % 60):02d}
+Tuning     : {tuning:+.2f} cents
 
-Tonalité      : {best_key}
-Camelot       : {CAMELOT_MAP.get(best_key, "??")}
-Confiance     : {final_conf:.4f}
+RÉSULTAT
+Tonalité   : {best_key}
+Camelot    : {CAMELOT_MAP.get(best_key, "??")}
+Confiance  : {final_conf:.4f}
 
-Pondération finale : profils globaux 42% • segments 58%
+PONDÉRATION : GLOBAL (65%) • SEGMENTS (35%)
 
-Chroma global :
+Distribution Chroma Global :
 """ + "\n".join(f"  {k:<3} : {v:.4f}" for k,v in zip(NOTES_LIST, chroma_global))
 
     return {
         "key": best_key,
         "camelot": CAMELOT_MAP.get(best_key, "??"),
         "conf": final_conf,
-        "report": report,
-        "adjusted": False  # placeholder
+        "report": report
     }
 
 # ────────────────────────────────────────────────
-# INTERFACE
+# INTERFACE STREAMLIT
 # ────────────────────────────────────────────────
 
-st.title("🎵 Music Key & Camelot Detector – Profiles + Segments")
-st.markdown("Vote équilibré : profils globaux 42% • analyse segmentée 58% (perception supprimée)")
+st.title("🎵 Key & Camelot Detector (Stable Global)")
+st.markdown(f"Configuration : **Poids Global {WEIGHTS['profiles_global']*100:.0f}%** | Segments {WEIGHTS['segments']*100:.0f}%")
 
+# Secrets Telegram
 try:
     bot_token = st.secrets["TELEGRAM_BOT_TOKEN"]
     chat_id   = st.secrets["TELEGRAM_CHAT_ID"]
     secrets_ok = True
-except KeyError:
-    bot_token = chat_id = None
+except:
     secrets_ok = False
 
-if not secrets_ok:
-    st.info("Pour activer Telegram : ajoutez TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID dans les secrets.")
-
-uploaded_files = st.file_uploader(
-    "Déposez vos fichiers audio",
-    type=["mp3", "wav", "ogg", "flac", "m4a"],
-    accept_multiple_files=True
-)
+uploaded_files = st.file_uploader("Fichiers audio", type=["mp3", "wav", "ogg", "flac", "m4a"], accept_multiple_files=True)
 
 if uploaded_files:
     total = len(uploaded_files)
     prog_global = st.progress(0)
-    status_global = st.empty()
-
-    container = st.container()
+    status_msg = st.empty()
 
     for i, file in enumerate(uploaded_files, 1):
-        prog_global.progress((i-1)/total)
-        status_global.markdown(f"**Traitement {i}/{total} →** {file.name}")
+        status_msg.markdown(f"**Analyse {i}/{total} :** {file.name}")
+        
+        data = process_audio(file.getvalue(), file.name)
+        
+        if "error" in data:
+            st.error(f"Erreur sur {file.name} : {data['error']}")
+            continue
 
-        with st.status(f"Analyse → {file.name}", expanded=(i==1)) as st_status:
-            st_status.write("Chargement & analyse...")
-            data = process_audio(file.getvalue(), file.name)
+        with st.container():
+            col1, col2, col3 = st.columns([2, 2, 1])
+            with col1:
+                st.subheader(file.name)
+                st.write(f"Tonalité : **{data['key']}**")
+            with col2:
+                st.markdown(f"<h1 style='color:#f59e0b; margin:0;'>{data['camelot']}</h1>", unsafe_allow_html=True)
+            with col3:
+                st.metric("Confiance", f"{data['conf']:.3f}")
 
-            if "error" in data:
-                st_status.update(label=f"Erreur : {data['error']}", state="error")
-                continue
-
-            st_status.update(label="Terminé ✓", state="complete", expanded=False)
-
-            with container:
-                st.markdown(f"### {file.name}")
-                colA, colB = st.columns([4, 1])
-                with colA:
-                    st.markdown(f"**Tonalité :** {data['key']}")
-                    st.markdown(f"**Camelot :** <span style='font-size:2.4em; color:#f59e0b; font-weight:bold;'>{data['camelot']}</span>", unsafe_allow_html=True)
-                with colB:
-                    st.metric("Confiance", f"{data['conf']:.3f}")
-
-                st.text_area("Rapport complet", data["report"], height=380)
-
+            with st.expander("Voir le rapport technique"):
+                st.text_area("Logs", data["report"], height=250, key=f"log_{i}")
+                
                 if secrets_ok:
-                    if st.button("Envoyer rapport Telegram", key=f"tg_{i}_{hash(file.name)}"):
-                        with st.spinner("Envoi..."):
-                            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                            payload = {"chat_id": chat_id, "text": f"🎵 {file.name}\n\n{data['report']}", "parse_mode": "Markdown"}
-                            try:
-                                r = requests.post(url, data=payload, timeout=12)
-                                if r.status_code == 200:
-                                    st.success("Envoyé")
-                                else:
-                                    st.error(f"Erreur {r.status_code}")
-                            except Exception as ex:
-                                st.error(f"Échec : {str(ex)}")
+                    if st.button("Envoyer Telegram", key=f"tg_{i}"):
+                        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                        payload = {"chat_id": chat_id, "text": f"🎵 *{file.name}*\n\n{data['report']}", "parse_mode": "Markdown"}
+                        requests.post(url, data=payload)
+                        st.toast("Envoyé !")
+            st.divider()
+        
+        prog_global.progress(i/total)
 
-                st.markdown("---")
-
-    prog_global.progress(1.0)
-    status_global.success(f"✓ {total} fichier(s) analysé(s)")
-
-st.markdown("<small>Version simplifiée : profils globaux 42% • segments 58%. Plus robuste sur EDM, rock, hip-hop moderne.</small>", unsafe_allow_html=True)
+    status_msg.success("Toutes les analyses sont terminées.")
