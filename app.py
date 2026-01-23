@@ -2,11 +2,13 @@ import streamlit as st
 import librosa
 import numpy as np
 import requests
-import tempfile
 import os
 from pydub import AudioSegment
 import io
 from collections import Counter
+
+# Import CORRECT pour butter et lfilter (c'était la source de l'erreur)
+from scipy.signal import butter, lfilter
 
 st.set_page_config(page_title="Music Key & Camelot Detector", page_icon="🎵", layout="wide")
 
