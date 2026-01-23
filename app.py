@@ -114,7 +114,7 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     # 2. ANALYSE PAR SEGMENTS (Poids : 35%)
     # Configuration demandée : 12s, Overlap 2s, Seuil 0.80
     seg_size = 12
-    overlap = 4
+    overlap = 6
     step = seg_size - overlap
     segment_votes = Counter()
     valid_count = 0
