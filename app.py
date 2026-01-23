@@ -134,7 +134,7 @@ def process_audio(file_bytes, file_name, sr_target=22050):
         confidence = seg_scores[best_key_seg]
 
         # Application du seuil de rigueur à 80%
-        if confidence >= 0.80:
+        if confidence >= 0.85:
             # Bonus de poids au centre du morceau
             mid_weight = 1.3 if 0.25 < (start_s / duration) < 0.75 else 1.0
             segment_votes[best_key_seg] += confidence * mid_weight
@@ -157,8 +157,8 @@ def process_audio(file_bytes, file_name, sr_target=22050):
 ──────────────────────────────────
 Fichier         : {file_name}
 Tuning Estimé   : {tuning:+.2f} cents
-Segments Valides: {valid_count} (Seuil > 0.80)
-Poids Global    : 65%
+Segments Valides: {valid_count} (Seuil > 0.8)
+Poids Global    : 80%
 Poids Segments  : 20%
 
 Tonalité Finale : {best_key}
