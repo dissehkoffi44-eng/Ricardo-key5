@@ -11,6 +11,10 @@ from scipy.signal import butter, lfilter
 # Configuration de la page
 st.set_page_config(page_title="Music Key Detector - Modulation Support", page_icon="🎵", layout="wide")
 
+# --- FORCE FFMEG PATH (Optionnel : utile si ffmpeg n'est pas dans le PATH système) ---
+if os.path.exists(r'C:\ffmpeg\bin'):
+    os.environ["PATH"] += os.pathsep + r'C:\ffmpeg\bin'
+
 # ────────────────────────────────────────────────
 # CONSTANTES & PROFILS
 # ────────────────────────────────────────────────
@@ -89,15 +93,26 @@ def vote_profiles(chroma_vector, bass_vector):
 def process_audio(file_bytes, file_name, sr_target=22050):
     ext = os.path.splitext(file_name)[1].lower()
     try:
-        audio = AudioSegment.from_file(io.BytesIO(file_bytes))
-        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
-        if audio.channels == 2:
-            samples = samples.reshape(-1, 2).mean(axis=1)
-        y = samples / (2**(8 * audio.sample_width - 1))
-        sr = audio.frame_rate
-        if sr != sr_target:
-            y = librosa.resample(y, orig_sr=sr, target_sr=sr_target)
-            sr = sr_target
+        # --- GESTION SPÉCIFIQUE M4A ---
+        if ext == '.m4a':
+            audio = AudioSegment.from_file(io.BytesIO(file_bytes), format="m4a")
+            samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+            if audio.channels == 2:
+                samples = samples.reshape(-1, 2).mean(axis=1)
+            # Normalisation basée sur l'amplitude maximale possible
+            y = samples / (2**(8 * audio.sample_width - 1))
+            sr = audio.frame_rate
+            
+            # Ré-échantillonnage immédiat si nécessaire
+            if sr != sr_target:
+                y = librosa.resample(y, orig_sr=sr, target_sr=sr_target)
+                sr = sr_target
+        
+        # --- CHARGEMENT STANDARD POUR AUTRES FORMATS ---
+        else:
+            with io.BytesIO(file_bytes) as buf:
+                y, sr = librosa.load(buf, sr=sr_target, mono=True)
+
     except Exception as e:
         return {"error": f"Erreur de décodage ({ext}): {str(e)}"}
 
