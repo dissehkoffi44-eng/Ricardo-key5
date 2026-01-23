@@ -9,7 +9,7 @@ from collections import Counter
 from scipy.signal import butter, lfilter
 
 # Configuration de la page
-st.set_page_config(page_title="Music Key Detector - Auto-Send", page_icon="🎵", layout="wide")
+st.set_page_config(page_title="Music Key Detector - FLAC Support", page_icon="🎵", layout="wide")
 
 # ────────────────────────────────────────────────
 # CONSTANTES & PROFILS
@@ -83,15 +83,31 @@ def vote_profiles(chroma_vector, bass_vector):
     return scores
 
 # ────────────────────────────────────────────────
-# TRAITEMENT
+# TRAITEMENT UNIFIÉ (FLAC / M4A / MP3)
 # ────────────────────────────────────────────────
 
 def process_audio(file_bytes, file_name, sr_target=22050):
+    ext = os.path.splitext(file_name)[1].lower()
     try:
-        with io.BytesIO(file_bytes) as buf:
-            y, sr = librosa.load(buf, sr=sr_target, mono=True)
-    except:
-        return {"error": "Format non supporté"}
+        # Utilisation de pydub pour décoder de manière universelle (FLAC inclus)
+        audio = AudioSegment.from_file(io.BytesIO(file_bytes))
+        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+        
+        # Gestion stéréo -> mono
+        if audio.channels == 2:
+            samples = samples.reshape(-1, 2).mean(axis=1)
+        
+        # Normalisation
+        y = samples / (2**(8 * audio.sample_width - 1))
+        sr = audio.frame_rate
+        
+        # Resampling si nécessaire
+        if sr != sr_target:
+            y = librosa.resample(y, orig_sr=sr, target_sr=sr_target)
+            sr = sr_target
+            
+    except Exception as e:
+        return {"error": f"Erreur de décodage ({ext}): {str(e)}"}
 
     duration = librosa.get_duration(y=y, sr=sr)
     tuning = librosa.estimate_tuning(y=y, sr=sr)
@@ -141,16 +157,12 @@ def process_audio(file_bytes, file_name, sr_target=22050):
 # INTERFACE
 # ────────────────────────────────────────────────
 
-st.title("🎵 Key Detector - Automatic Mode")
+st.title("🎵 Universal Key Detector (FLAC Supported)")
 
-# Récupération secrets
 bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN")
 chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
 
-if not bot_token or not chat_id:
-    st.warning("Secrets Telegram manquants. L'envoi automatique est désactivé.")
-
-uploaded_files = st.file_uploader("Audios", type=["mp3", "wav", "m4a"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Audios (FLAC, MP3, WAV, M4A)", type=["flac", "mp3", "wav", "m4a"], accept_multiple_files=True)
 
 if uploaded_files:
     results_list = []
@@ -158,25 +170,22 @@ if uploaded_files:
     status_txt = st.empty()
 
     for i, file in enumerate(uploaded_files, 1):
-        status_txt.write(f"Analyse & Envoi : {file.name}...")
+        status_txt.write(f"Analyse & Auto-send : {file.name}...")
         data = process_audio(file.getvalue(), file.name)
         
         if "error" not in data:
             data['name'] = file.name
             results_list.append(data)
             
-            # --- ENVOI AUTOMATIQUE TELEGRAM ---
-            report = (f"✅ *{file.name}*\n"
-                      f"Tonalité : `{data['key']}`\n"
-                      f"Camelot : *{data['camelot']}*\n"
-                      f"Confiance : {data['conf']:.3f}\n"
-                      f"Segments validés : {data['valid_seg']}")
+            # Envoi Telegram
+            report = (f"🎵 *{file.name}*\n"
+                      f"Key: `{data['key']}` | Camelot: *{data['camelot']}*\n"
+                      f"Conf: {data['conf']:.3f} | Segments: {data['valid_seg']}")
             send_telegram_auto(report, bot_token, chat_id)
-            # ----------------------------------
             
         prog_bar.progress(i / len(uploaded_files))
 
-    status_txt.success(f"Terminé : {len(results_list)} fichiers analysés et envoyés.")
+    status_txt.success("Analyses terminées.")
 
     # AFFICHAGE LISTE
     st.markdown("---")
@@ -185,7 +194,7 @@ if uploaded_files:
             c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
             with c1:
                 st.markdown(f"**{item['name']}**")
-                st.caption(f"Tuning: {item['tuning']:+.2f} | {int(item['duration']//60)}m {int(item['duration']%60)}s")
+                st.caption(f"Format: {item['name'].split('.')[-1].upper()} | Tuning: {item['tuning']:+.2f}")
             with c2:
                 st.markdown(f"<h2 style='color:#f59e0b; margin:0;'>{item['camelot']}</h2>", unsafe_allow_html=True)
             with c3:
