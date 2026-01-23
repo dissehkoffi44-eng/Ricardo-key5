@@ -11,7 +11,7 @@ from scipy.signal import butter, lfilter
 # Configuration de la page
 st.set_page_config(page_title="Music Key Detector - Modulation Support", page_icon="🎵", layout="wide")
 
-# --- FORCE FFMEG PATH (Optionnel : utile si ffmpeg n'est pas dans le PATH système) ---
+# --- FORCE FFMPEG PATH (Optionnel) ---
 if os.path.exists(r'C:\ffmpeg\bin'):
     os.environ["PATH"] += os.pathsep + r'C:\ffmpeg\bin'
 
@@ -93,22 +93,16 @@ def vote_profiles(chroma_vector, bass_vector):
 def process_audio(file_bytes, file_name, sr_target=22050):
     ext = os.path.splitext(file_name)[1].lower()
     try:
-        # --- GESTION SPÉCIFIQUE M4A ---
         if ext == '.m4a':
             audio = AudioSegment.from_file(io.BytesIO(file_bytes), format="m4a")
             samples = np.array(audio.get_array_of_samples()).astype(np.float32)
             if audio.channels == 2:
                 samples = samples.reshape(-1, 2).mean(axis=1)
-            # Normalisation basée sur l'amplitude maximale possible
             y = samples / (2**(8 * audio.sample_width - 1))
             sr = audio.frame_rate
-            
-            # Ré-échantillonnage immédiat si nécessaire
             if sr != sr_target:
                 y = librosa.resample(y, orig_sr=sr, target_sr=sr_target)
                 sr = sr_target
-        
-        # --- CHARGEMENT STANDARD POUR AUTRES FORMATS ---
         else:
             with io.BytesIO(file_bytes) as buf:
                 y, sr = librosa.load(buf, sr=sr_target, mono=True)
@@ -120,12 +114,12 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     tuning = librosa.estimate_tuning(y=y, sr=sr)
     y_filt = apply_precision_filters(y, sr)
 
-    # 1. Analyse Globale
+    # Analyse globale
     chroma_glob = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning), axis=1)
     bass_glob = np.mean(librosa.feature.chroma_cqt(y=butter_lowpass(y, sr), sr=sr), axis=1)
     global_scores = vote_profiles(chroma_glob, bass_glob)
 
-    # 2. Analyse par Segments & Timeline pour Modulation
+    # Analyse par segments
     seg_size, overlap = 12, 6
     step = seg_size - overlap
     segment_votes = Counter()
@@ -142,24 +136,22 @@ def process_audio(file_bytes, file_name, sr_target=22050):
         seg_scores = vote_profiles(c_seg, b_seg)
         best_k = max(seg_scores, key=seg_scores.get)
         
-        if seg_scores[best_k] >= 0.75: # Seuil légèrement abaissé pour capturer la dynamique
+        if seg_scores[best_k] >= 0.75:
             weight = 1.3 if 0.25 < (start_s / duration) < 0.75 else 1.0
             segment_votes[best_k] += seg_scores[best_k] * weight
             segment_timeline.append(best_k)
             valid_count += 1
 
-    # --- Logique de détection de Modulation ---
+    # Détection modulation
     modulation_detected = None
     if len(segment_timeline) >= 4:
         mid = len(segment_timeline) // 2
-        # On compare la clé dominante de la 1ère moitié vs la 2ème moitié
         first_half_key = Counter(segment_timeline[:mid]).most_common(1)[0][0]
         second_half_key = Counter(segment_timeline[mid:]).most_common(1)[0][0]
-        
         if first_half_key != second_half_key:
             modulation_detected = second_half_key
 
-    # Calcul final pondéré
+    # Score final pondéré
     if segment_votes:
         total_v = sum(segment_votes.values())
         segment_votes_norm = {k: v / total_v for k, v in segment_votes.items()}
@@ -188,6 +180,10 @@ def process_audio(file_bytes, file_name, sr_target=22050):
 
 st.title("🎵 Universal Key Detector (Modulation Aware)")
 
+# ─── Barre de progression globale ───────────────────────────────
+global_progress = st.progress(0)
+global_status = st.empty()
+
 bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN")
 chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
 
@@ -195,18 +191,26 @@ uploaded_files = st.file_uploader("Audios (FLAC, MP3, WAV, M4A)", type=["flac", 
 
 if uploaded_files:
     results_list = []
-    prog_bar = st.progress(0)
-    status_txt = st.empty()
+    n_files = len(uploaded_files)
+
+    # Réinitialisation de la barre globale
+    global_progress.progress(0)
+    global_status.text(f"0 / {n_files} fichiers traités (0%)")
 
     for i, file in enumerate(uploaded_files, 1):
-        status_txt.write(f"Analyse & Auto-send : {file.name}...")
-        data = process_audio(file.getvalue(), file.name)
+        # Mise à jour barre globale AVANT traitement
+        percent = (i - 1) / n_files
+        global_progress.progress(percent)
+        global_status.text(f"{i-1} / {n_files} fichiers traités ({percent:.0%})")
+
+        # Traitement du fichier
+        with st.spinner(f"Analyse de {file.name} ({i}/{n_files})"):
+            data = process_audio(file.getvalue(), file.name)
         
         if "error" not in data:
             data['name'] = file.name
             results_list.append(data)
             
-            # Préparation du rapport Telegram avec info Modulation
             mod_text = f"\n⚠️ *Modulation detectée:* `{data['modulation']}`" if data['modulation'] else ""
             report = (f"🎵 *{file.name}*\n"
                       f"Key: `{data['key']}` | Camelot: *{data['camelot']}*\n"
@@ -214,12 +218,16 @@ if uploaded_files:
                       f"{mod_text}")
             
             send_telegram_auto(report, bot_token, chat_id)
-            
-        prog_bar.progress(i / len(uploaded_files))
 
-    status_txt.success("Analyses terminées.")
+        # Mise à jour après traitement
+        percent = i / n_files
+        global_progress.progress(percent)
+        global_status.text(f"{i} / {n_files} fichiers traités ({percent:.0%})")
 
-    # AFFICHAGE LISTE
+    # Fin du traitement
+    global_progress.progress(1.0)
+    global_status.success(f"Analyse terminée — {n_files} fichier(s) traité(s)")
+
     st.markdown("---")
     
     for item in results_list:
