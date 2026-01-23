@@ -179,7 +179,7 @@ def process_audio(file_bytes, file_name, sr_target=22050):
 # INTERFACE
 # ────────────────────────────────────────────────
 
-st.title("🎵 Universal Key Detector (Modulation Aware)")
+st.title("🎵 Music Key Expert")
 
 # Barre de progression globale
 global_progress = st.progress(0)
