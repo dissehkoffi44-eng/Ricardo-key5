@@ -9,7 +9,7 @@ from collections import Counter
 from scipy.signal import butter, lfilter
 
 # Configuration de la page
-st.set_page_config(page_title="Music Key Detector - 12s Precision", page_icon="🎵", layout="wide")
+st.set_page_config(page_title="Music Key Detector - List Mode", page_icon="🎵", layout="wide")
 
 # ────────────────────────────────────────────────
 # CONSTANTES & PROFILS
@@ -44,13 +44,14 @@ CAMELOT_MAP = {
     'G# minor': '1A', 'A minor': '8A', 'A# minor': '3A', 'B minor': '10A'
 }
 
+# ─── NOUVELLE PONDÉRATION DEMANDÉE ───
 WEIGHTS = {
-    "profiles_global": 0.65,
-    "segments": 0.35
+    "profiles_global": 0.70,
+    "segments": 0.30
 }
 
 # ────────────────────────────────────────────────
-# FONCTIONS AUDIO & FILTRAGE
+# FONCTIONS TECHNIQUES
 # ────────────────────────────────────────────────
 
 def butter_lowpass(y, sr, cutoff=150):
@@ -73,112 +74,77 @@ def vote_profiles(chroma_vector, bass_vector):
         for mode in ["major", "minor"]:
             for i in range(12):
                 corr = np.corrcoef(cv, np.roll(p_data[mode], i))[0, 1]
-                # Pondération interne : Corrélation + Fondamentale + Quintes
                 bonus = (bv[i] * 0.45) + (cv[i] * 0.40) + (cv[(i+7)%12] * 0.15)
                 scores[f"{NOTES_LIST[i]} {mode}"] += (corr + bonus) / len(PROFILES)
     return scores
 
 # ────────────────────────────────────────────────
-# TRAITEMENT PRINCIPAL
+# CŒUR DU TRAITEMENT
 # ────────────────────────────────────────────────
 
 def process_audio(file_bytes, file_name, sr_target=22050):
-    ext = os.path.splitext(file_name)[1].lower()
     try:
-        if ext == '.m4a':
-            audio = AudioSegment.from_file(io.BytesIO(file_bytes), format="m4a")
-            samples = np.array(audio.get_array_of_samples()).astype(np.float32)
-            if audio.channels == 2: samples = samples.reshape(-1, 2).mean(axis=1)
-            y = samples / 32768.0
-            sr = audio.frame_rate
-            if sr != sr_target:
-                y = librosa.resample(y, orig_sr=sr, target_sr=sr_target)
-                sr = sr_target
-        else:
-            with io.BytesIO(file_bytes) as buf:
-                y, sr = librosa.load(buf, sr=sr_target, mono=True)
-    except Exception as e:
-        return {"error": str(e)}
+        with io.BytesIO(file_bytes) as buf:
+            y, sr = librosa.load(buf, sr=sr_target, mono=True)
+    except:
+        return {"error": "Format non supporté"}
 
     duration = librosa.get_duration(y=y, sr=sr)
-    if duration < 15: return {"error": "Fichier trop court pour l'analyse 12s"}
-
     tuning = librosa.estimate_tuning(y=y, sr=sr)
     y_filt = apply_precision_filters(y, sr)
 
-    # 1. ANALYSE GLOBALE (Poids fort : 65%)
+    # 1. ANALYSE GLOBALE (70%)
     chroma_glob = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning), axis=1)
     bass_glob = np.mean(librosa.feature.chroma_cqt(y=butter_lowpass(y, sr), sr=sr), axis=1)
     global_scores = vote_profiles(chroma_glob, bass_glob)
 
-    # 2. ANALYSE PAR SEGMENTS (Poids : 35%)
-    # Configuration demandée : 12s, Overlap 2s, Seuil 0.80
-    seg_size = 12
-    overlap = 6
+    # 2. ANALYSE PAR SEGMENTS (30%) - 12s / 6s overlap
+    seg_size, overlap = 12, 6
     step = seg_size - overlap
     segment_votes = Counter()
     valid_count = 0
 
     for start_s in range(0, int(duration) - seg_size, step):
-        start_samp = int(start_s * sr)
-        end_samp = int((start_s + seg_size) * sr)
-        y_seg = y_filt[start_samp : end_samp]
-        
+        y_seg = y_filt[int(start_s * sr) : int((start_s + seg_size) * sr)]
         if np.max(np.abs(y_seg)) < 0.02: continue
 
         c_seg = np.mean(librosa.feature.chroma_cqt(y=y_seg, sr=sr, tuning=tuning), axis=1)
-        b_seg = np.mean(librosa.feature.chroma_cqt(y=butter_lowpass(y[start_samp:end_samp], sr), sr=sr), axis=1)
+        b_seg = np.mean(librosa.feature.chroma_cqt(y=butter_lowpass(y_seg, sr), sr=sr), axis=1)
         
         seg_scores = vote_profiles(c_seg, b_seg)
         best_key_seg = max(seg_scores, key=seg_scores.get)
-        confidence = seg_scores[best_key_seg]
-
-        # Application du seuil de rigueur à 80%
-        if confidence >= 0.85:
-            # Bonus de poids au centre du morceau
-            mid_weight = 1.3 if 0.25 < (start_s / duration) < 0.75 else 1.0
-            segment_votes[best_key_seg] += confidence * mid_weight
+        
+        # Seuil de rigueur 80%
+        if seg_scores[best_key_seg] >= 0.80:
+            weight = 1.3 if 0.25 < (start_s / duration) < 0.75 else 1.0
+            segment_votes[best_key_seg] += seg_scores[best_key_seg] * weight
             valid_count += 1
 
-    # Normalisation des votes segments
     if segment_votes:
         total_v = sum(segment_votes.values())
         segment_votes = {k: v / total_v for k, v in segment_votes.items()}
 
-    # COMBINAISON FINALE
+    # VOTE FINAL
     final_results = Counter()
     for key in global_scores:
-        sc = (global_scores[key] * WEIGHTS["profiles_global"]) + (segment_votes.get(key, 0) * WEIGHTS["segments"])
-        final_results[key] = sc
+        final_results[key] = (global_scores[key] * WEIGHTS["profiles_global"]) + (segment_votes.get(key, 0) * WEIGHTS["segments"])
 
     best_key, best_score = final_results.most_common(1)[0]
-
-    report = f"""RAPPORT DE PRÉCISION (12s Segments)
-──────────────────────────────────
-Fichier         : {file_name}
-Tuning Estimé   : {tuning:+.2f} cents
-Segments Valides: {valid_count} (Seuil > 0.8)
-Poids Global    : 80%
-Poids Segments  : 20%
-
-Tonalité Finale : {best_key}
-Camelot         : {CAMELOT_MAP.get(best_key, "??")}
-Confiance       : {best_score:.4f}
-"""
+    
     return {
         "key": best_key,
         "camelot": CAMELOT_MAP.get(best_key, "??"),
         "conf": best_score,
         "valid_seg": valid_count,
-        "report": report
+        "duration": duration
     }
 
 # ────────────────────────────────────────────────
-# INTERFACE UTILISATEUR
+# INTERFACE UTILISATEUR (MODE LISTE)
 # ────────────────────────────────────────────────
 
-st.title("🎵 Music Key & Camelot - Precision 12s")
-st.markdown("Segments : **12s** | Overlap : **2s** | Seuil de Rigueur : **80%** | Poids Global : **65%**")
+st.title("🎵 Music Key List Detector")
+st.markdown(f"**Poids : Global {WEIGHTS['profiles_global']*100:.0f}% / Segments {WEIGHTS['segments']*100:.0f}%** | Segments: 12s (Overlap 6s)")
 
 # Secrets Telegram
 try:
@@ -188,39 +154,56 @@ try:
 except:
     secrets_ok = False
 
-uploaded_files = st.file_uploader("Glissez vos fichiers audio ici", type=["mp3", "wav", "m4a", "flac"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Envoyez vos morceaux", type=["mp3", "wav", "m4a"], accept_multiple_files=True)
 
 if uploaded_files:
-    total = len(uploaded_files)
-    prog_bar = st.progress(0)
+    results_list = []
     
+    # Barre de progression globale
+    prog_bar = st.progress(0)
+    status_msg = st.empty()
+
     for i, file in enumerate(uploaded_files, 1):
-        with st.status(f"Analyse en cours : {file.name}...", expanded=True) as s:
-            data = process_audio(file.getvalue(), file.name)
-            
-            if "error" in data:
-                st.error(f"Erreur : {data['error']}")
-                continue
-            
-            col1, col2, col3 = st.columns([2, 1, 1])
-            with col1:
-                st.subheader(f"📄 {file.name}")
-                st.write(f"Résultat : **{data['key']}**")
-            with col2:
-                st.markdown(f"<h1 style='color:#f59e0b; margin:0;'>{data['camelot']}</h1>", unsafe_allow_html=True)
-            with col3:
-                st.metric("Confiance", f"{data['conf']:.3f}")
-                st.caption(f"{data['valid_seg']} segments certifiés")
+        status_msg.write(f"Analyse de {file.name}...")
+        data = process_audio(file.getvalue(), file.name)
+        
+        if "error" in data:
+            st.error(f"Erreur sur {file.name}")
+        else:
+            data['name'] = file.name
+            results_list.append(data)
+        
+        prog_bar.progress(i / len(uploaded_files))
 
-            with st.expander("Détails de l'analyse"):
-                st.text_area("Logs techniques", data["report"], height=200, key=f"log_{i}")
+    status_msg.success(f"Analyse terminée pour {len(results_list)} fichier(s).")
+
+    # AFFICHAGE SOUS FORME DE LISTE
+    st.markdown("---")
+    for item in results_list:
+        with st.container():
+            # Création d'une ligne de type "Liste"
+            c1, c2, c3, c4, c5 = st.columns([3, 1.5, 1, 1, 1.5])
+            
+            with c1:
+                st.markdown(f"**{item['name']}**")
+                st.caption(f"Durée: {int(item['duration']//60)}m {int(item['duration']%60)}s | Segments valides: {item['valid_seg']}")
+            
+            with c2:
+                st.markdown(f"<span style='font-size:1.5em; color:#f59e0b; font-weight:bold;'>{item['camelot']}</span>", unsafe_allow_html=True)
+            
+            with c3:
+                st.markdown(f"`{item['key']}`")
+            
+            with c4:
+                color = "green" if item['conf'] > 0.7 else "orange"
+                st.markdown(f"<span style='color:{color}'>{item['conf']:.3f}</span>", unsafe_allow_html=True)
+            
+            with c5:
                 if secrets_ok:
-                    if st.button("Envoyer via Telegram", key=f"tg_{i}"):
-                        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                        payload = {"chat_id": chat_id, "text": f"✅ *{file.name}*\n{data['report']}", "parse_mode": "Markdown"}
-                        requests.post(url, data=payload)
-                        st.toast("Rapport envoyé !")
-
-            s.update(label=f"Analyse {file.name} terminée ✓", state="complete", expanded=False)
+                    if st.button("Telegram", key=f"tg_{item['name']}"):
+                        msg = f"🎵 *{item['name']}*\nResult: {item['key']} ({item['camelot']})\nConf: {item['conf']:.3f}"
+                        requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", 
+                                      data={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
+                        st.toast("Envoyé !")
+            
             st.divider()
-        prog_bar.progress(i/total)
