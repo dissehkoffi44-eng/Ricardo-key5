@@ -159,7 +159,7 @@ Fichier         : {file_name}
 Tuning Estimé   : {tuning:+.2f} cents
 Segments Valides: {valid_count} (Seuil > 0.80)
 Poids Global    : 65%
-Poids Segments  : 35%
+Poids Segments  : 20%
 
 Tonalité Finale : {best_key}
 Camelot         : {CAMELOT_MAP.get(best_key, "??")}
