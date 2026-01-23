@@ -84,7 +84,7 @@ def vote_profiles(chroma_vector, bass_vector):
         for mode in ["major", "minor"]:
             for i in range(12):
                 corr = np.corrcoef(cv, np.roll(p_data[mode], i))[0, 1]
-                bonus = (bv[i] * 0.45) + (cv[i] * 0.40) + (cv[(i+7)%12] * 0.15)
+                bonus = (bv[i] * 0.25) + (cv[i] * 0.40) + (cv[(i+7)%12] * 0.15)
                 scores[f"{NOTES_LIST[i]} {mode}"] += (corr + bonus) / len(PROFILES)
     return scores
 
