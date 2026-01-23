@@ -7,6 +7,7 @@ from pydub import AudioSegment
 import io
 from collections import Counter
 from scipy.signal import butter, lfilter
+import gc
 
 # Configuration de la page
 st.set_page_config(page_title="Music Key Detector - Modulation Support", page_icon="🎵", layout="wide")
@@ -180,7 +181,7 @@ def process_audio(file_bytes, file_name, sr_target=22050):
 
 st.title("🎵 Universal Key Detector (Modulation Aware)")
 
-# ─── Barre de progression globale ───────────────────────────────
+# Barre de progression globale
 global_progress = st.progress(0)
 global_status = st.empty()
 
@@ -190,59 +191,52 @@ chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
 uploaded_files = st.file_uploader("Audios (FLAC, MP3, WAV, M4A)", type=["flac", "mp3", "wav", "m4a"], accept_multiple_files=True)
 
 if uploaded_files:
-    results_list = []
     n_files = len(uploaded_files)
 
-    # Réinitialisation de la barre globale
     global_progress.progress(0)
     global_status.text(f"0 / {n_files} fichiers traités (0%)")
 
     for i, file in enumerate(uploaded_files, 1):
-        # Mise à jour barre globale AVANT traitement
         percent = (i - 1) / n_files
         global_progress.progress(percent)
         global_status.text(f"{i-1} / {n_files} fichiers traités ({percent:.0%})")
 
-        # Traitement du fichier
         with st.spinner(f"Analyse de {file.name} ({i}/{n_files})"):
             data = process_audio(file.getvalue(), file.name)
-        
+            gc.collect()  # Libération mémoire après chaque fichier
+
         if "error" not in data:
             data['name'] = file.name
-            results_list.append(data)
             
-            mod_text = f"\n⚠️ *Modulation detectée:* `{data['modulation']}`" if data['modulation'] else ""
+            mod_text = f"\n⚠️ *Modulation détectée :* `{data['modulation']}`" if data.get('modulation') else ""
             report = (f"🎵 *{file.name}*\n"
                       f"Key: `{data['key']}` | Camelot: *{data['camelot']}*\n"
-                      f"Conf: {data['conf']:.3f} | Segments: {data['valid_seg']}"
+                      f"Conf: **{data['conf']*100:.1f}%** | Segments: {data['valid_seg']}"
                       f"{mod_text}")
             
             send_telegram_auto(report, bot_token, chat_id)
 
-        # Mise à jour après traitement
+            # Affichage immédiat du résultat
+            st.markdown("---")
+            with st.container():
+                c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+                with c1:
+                    st.markdown(f"**{data['name']}**")
+                    st.caption(f"Format: {data['name'].split('.')[-1].upper()}  |  Tuning: {data['tuning']:+.2f}¢")
+                with c2:
+                    st.markdown(f"<h2 style='color:#f59e0b; margin:0; text-align:center;'>{data['camelot']}</h2>", unsafe_allow_html=True)
+                with c3:
+                    st.markdown(f"**{data['key']}**")
+                    if data.get('modulation'):
+                        mod_cam = CAMELOT_MAP.get(data['modulation'], "??")
+                        st.markdown(f"<p style='color:#ef4444; font-size:0.85em; margin-top:6px;'>→ Mod: {data['modulation']} ({mod_cam})</p>", unsafe_allow_html=True)
+                with c4:
+                    st.metric("Confiance", f"{data['conf']*100:.1f} %")
+                st.divider()
+
         percent = i / n_files
         global_progress.progress(percent)
         global_status.text(f"{i} / {n_files} fichiers traités ({percent:.0%})")
 
-    # Fin du traitement
     global_progress.progress(1.0)
     global_status.success(f"Analyse terminée — {n_files} fichier(s) traité(s)")
-
-    st.markdown("---")
-    
-    for item in results_list:
-        with st.container():
-            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-            with c1:
-                st.markdown(f"**{item['name']}**")
-                st.caption(f"Format: {item['name'].split('.')[-1].upper()} | Tuning: {item['tuning']:+.2f}")
-            with c2:
-                st.markdown(f"<h2 style='color:#f59e0b; margin:0;'>{item['camelot']}</h2>", unsafe_allow_html=True)
-            with c3:
-                st.markdown(f"**{item['key']}**")
-                if item['modulation']:
-                    mod_cam = CAMELOT_MAP.get(item['modulation'], "??")
-                    st.markdown(f"<p style='color:#ef4444; font-size:0.8em; margin-top:5px;'>➡ Mod: {item['modulation']} ({mod_cam})</p>", unsafe_allow_html=True)
-            with c4:
-                st.metric("Confiance", f"{item['conf']:.3f}")
-            st.divider()
