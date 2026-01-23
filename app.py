@@ -6,8 +6,6 @@ import tempfile
 import os
 from pydub import AudioSegment
 import io
-import wave
-from scipy.signal import butter, lfilter
 from collections import Counter
 
 st.set_page_config(page_title="Music Key & Camelot Detector", page_icon="🎵", layout="wide")
@@ -47,9 +45,8 @@ CAMELOT_MAP = {
 
 # Poids des différentes sources de vote (somme = 1.0)
 WEIGHTS = {
-    "profiles_global": 0.35,
-    "segments":        0.40,
-    "perception":      0.25
+    "profiles_global": 0.42,
+    "segments":        0.58
 }
 
 # ────────────────────────────────────────────────
@@ -114,78 +111,6 @@ def vote_profiles(chroma_vector, bass_vector):
     return profile_scores
 
 # ────────────────────────────────────────────────
-# SIMULATION ACCORD PIANO & PERCEPTION
-# ────────────────────────────────────────────────
-
-def generate_piano_chord_audio(key_str, sr=22050, duration=2.0):
-    root_note, mode = key_str.split()
-    notes_freq = {
-        'C':261.63, 'C#':277.18, 'D':293.66, 'D#':311.13, 'E':329.63,
-        'F':349.23, 'F#':369.99, 'G':392.00, 'G#':415.30, 'A':440.00,
-        'A#':466.16, 'B':493.88
-    }
-
-    intervals = [0, 4, 7] if mode == 'major' else [0, 3, 7]
-    root_freq = notes_freq.get(root_note, 440.0)
-    freqs = [root_freq * (2 ** (i / 12.0)) for i in intervals]
-
-    t = np.linspace(0, duration, int(sr * duration), False)
-
-    attack, decay, sustain, release = 0.01, 0.20, 0.60, duration - 0.21
-    env = np.zeros_like(t)
-    atk_end = int(attack * sr)
-    dec_end = int((attack + decay) * sr)
-    rel_start = int((duration - release) * sr)
-
-    env[:atk_end] = np.linspace(0, 1, atk_end)
-    env[atk_end:dec_end] = np.linspace(1, sustain, dec_end - atk_end)
-    env[dec_end:rel_start] = sustain
-    env[rel_start:] = np.linspace(sustain, 0, len(env) - rel_start)
-
-    y = np.zeros_like(t)
-    for f in freqs:
-        for harm in range(1, 6):
-            amp = 1.0 / harm
-            y += amp * np.sin(2 * np.pi * f * harm * t)
-
-    y *= env
-    y = 0.5 * y / np.abs(y).max()
-    y_int = (y * 32767).astype(np.int16)
-
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(y_int.tobytes())
-    buf.seek(0)
-    return buf.read(), y
-
-def simulate_ear_perception(chord_y, song_y, sr, chroma_song):
-    stft_chord = np.abs(librosa.stft(chord_y))
-    freqs = librosa.fft_frequencies(sr=sr)
-    mag = np.mean(stft_chord, axis=1)
-
-    peak_idxs = np.argsort(mag)[-12:]
-    chord_freqs = freqs[peak_idxs]
-
-    roughness = 0.0
-    for i in range(len(chord_freqs)):
-        for j in range(i+1, len(chord_freqs)):
-            df = abs(chord_freqs[i] - chord_freqs[j])
-            if 15 < df < 250:
-                cbw = 0.25 * (chord_freqs[i] + chord_freqs[j]) / 2
-                roughness += (mag[peak_idxs[i]] * mag[peak_idxs[j]]) * (df / cbw) ** 2
-
-    consonance = 1 / (1 + roughness + 1e-6)
-
-    chroma_chord = librosa.feature.chroma_stft(y=chord_y, sr=sr)
-    chroma_chord_avg = np.mean(chroma_chord, axis=1)
-
-    similarity = np.corrcoef(chroma_song, chroma_chord_avg)[0, 1]
-    return 0.60 * similarity + 0.40 * consonance
-
-# ────────────────────────────────────────────────
 # TRAITEMENT PRINCIPAL D'UN FICHIER
 # ────────────────────────────────────────────────
 
@@ -242,7 +167,6 @@ def process_audio(file_bytes, file_name, sr_target=22050):
         chroma_seg = np.mean(librosa.feature.chroma_cqt(y=y_seg, sr=sr, tuning=tuning, hop_length=512), axis=1)
         bass_seg = get_bass_priority(y[start:end], sr)
 
-        # Correction ici : on utilise vote_profiles au lieu de solve_key_sniper
         seg_profile_scores = vote_profiles(chroma_seg, bass_seg)
 
         if seg_profile_scores:
@@ -259,42 +183,13 @@ def process_audio(file_bytes, file_name, sr_target=22050):
         total_seg = sum(segment_votes.values())
         segment_votes = {k: v / total_seg for k, v in segment_votes.items()}
 
-    # ─── VOTE 3 : perception (simulation accords) ────────────────
-    combined_votes = Counter()
-    for key, score in global_profile_votes.items():
-        combined_votes[key] += score * 0.6
-    for key, score in segment_votes.items():
-        combined_votes[key] += score * 0.4
-
-    top_candidates = [k for k, _ in combined_votes.most_common(5)]
-
-    perception_votes = {}
-    best_audio = None
-    best_perc_score = -1
-
-    for cand in top_candidates:
-        audio_bytes, chord_y = generate_piano_chord_audio(cand, sr=sr)
-        perc_score = simulate_ear_perception(chord_y, y, sr, chroma_global)
-        perception_votes[cand] = perc_score
-
-        if perc_score > best_perc_score:
-            best_perc_score = perc_score
-            best_audio = audio_bytes
-
-    # Normalisation perception
-    if perception_votes:
-        perc_max = max(perception_votes.values())
-        if perc_max > 0:
-            perception_votes = {k: v / perc_max for k, v in perception_votes.items()}
-
     # ─── VOTE FINAL pondéré ──────────────────────────────────────
     final_votes = Counter()
 
-    for key in set(list(global_profile_votes.keys()) + list(segment_votes.keys()) + list(perception_votes.keys())):
+    for key in set(list(global_profile_votes.keys()) + list(segment_votes.keys())):
         score = 0.0
         score += global_profile_votes.get(key, 0.0) * WEIGHTS["profiles_global"]
         score += segment_votes.get(key, 0.0) * WEIGHTS["segments"]
-        score += perception_votes.get(key, 0.0) * WEIGHTS["perception"]
         final_votes[key] = score
 
     if not final_votes:
@@ -314,16 +209,15 @@ Tonalité      : {best_key}
 Camelot       : {CAMELOT_MAP.get(best_key, "??")}
 Confiance     : {final_conf:.4f}
 
-Scores perception (normalisés) :
-""" + "\n".join(f"  {k:<12} : {v:.4f}" for k,v in sorted(perception_votes.items(), key=lambda x:x[1], reverse=True) if k in top_candidates)
+Pondération finale : profils globaux 42% • segments 58%
 
-    report += "\n\nChroma global :\n" + "\n".join(f"  {k:<3} : {v:.4f}" for k,v in zip(NOTES_LIST, chroma_global))
+Chroma global :
+""" + "\n".join(f"  {k:<3} : {v:.4f}" for k,v in zip(NOTES_LIST, chroma_global))
 
     return {
         "key": best_key,
         "camelot": CAMELOT_MAP.get(best_key, "??"),
         "conf": final_conf,
-        "audio_bytes": best_audio,
         "report": report,
         "adjusted": False  # placeholder
     }
@@ -332,8 +226,8 @@ Scores perception (normalisés) :
 # INTERFACE
 # ────────────────────────────────────────────────
 
-st.title("🎵 Music Key & Camelot Detector – Balanced Voting")
-st.markdown("Profils + segments + perception avec poids équilibrés")
+st.title("🎵 Music Key & Camelot Detector – Profiles + Segments")
+st.markdown("Vote équilibré : profils globaux 42% • analyse segmentée 58% (perception supprimée)")
 
 try:
     bot_token = st.secrets["TELEGRAM_BOT_TOKEN"]
@@ -382,9 +276,7 @@ if uploaded_files:
                 with colB:
                     st.metric("Confiance", f"{data['conf']:.3f}")
 
-                if data.get("audio_bytes"):
-                    st.audio(data["audio_bytes"], format="audio/wav")
-                st.text_area("Rapport complet", data["report"], height=420)
+                st.text_area("Rapport complet", data["report"], height=380)
 
                 if secrets_ok:
                     if st.button("Envoyer rapport Telegram", key=f"tg_{i}_{hash(file.name)}"):
@@ -405,4 +297,4 @@ if uploaded_files:
     prog_global.progress(1.0)
     status_global.success(f"✓ {total} fichier(s) analysé(s)")
 
-st.markdown("<small>Voting équilibré : profils 35% • segments 40% • perception 25%. Précision estimée 88–96 % selon genre.</small>", unsafe_allow_html=True)
+st.markdown("<small>Version simplifiée : profils globaux 42% • segments 58%. Plus robuste sur EDM, rock, hip-hop moderne.</small>", unsafe_allow_html=True)
