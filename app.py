@@ -7,9 +7,14 @@ from pydub import AudioSegment
 import io
 from collections import Counter
 from scipy.signal import butter, lfilter
+import gc
 
 # Configuration de la page
-st.set_page_config(page_title="Music Key Detector - FLAC Support", page_icon="🎵", layout="wide")
+st.set_page_config(page_title="Music Key Expert", page_icon="🎵", layout="wide")
+
+# --- FORCE FFMPEG PATH (Optionnel) ---
+if os.path.exists(r'C:\ffmpeg\bin'):
+    os.environ["PATH"] += os.pathsep + r'C:\ffmpeg\bin'
 
 # ────────────────────────────────────────────────
 # CONSTANTES & PROFILS
@@ -73,39 +78,39 @@ def send_telegram_auto(msg, bot_token, chat_id):
 def vote_profiles(chroma_vector, bass_vector):
     cv = (chroma_vector - chroma_vector.min()) / (chroma_vector.max() - chroma_vector.min() + 1e-8)
     bv = (bass_vector - bass_vector.min()) / (bass_vector.max() - bass_vector.min() + 1e-8)
+    
     scores = {f"{n} {m}": 0.0 for n in NOTES_LIST for m in ["major", "minor"]}
+    
     for p_data in PROFILES.values():
         for mode in ["major", "minor"]:
             for i in range(12):
                 corr = np.corrcoef(cv, np.roll(p_data[mode], i))[0, 1]
                 bonus = (bv[i] * 0.45) + (cv[i] * 0.40) + (cv[(i+7)%12] * 0.15)
                 scores[f"{NOTES_LIST[i]} {mode}"] += (corr + bonus) / len(PROFILES)
+    
     return scores
 
 # ────────────────────────────────────────────────
-# TRAITEMENT UNIFIÉ (FLAC / M4A / MP3)
+# TRAITEMENT UNIFIÉ AVEC DÉTECTION DE MODULATION
 # ────────────────────────────────────────────────
 
 def process_audio(file_bytes, file_name, sr_target=22050):
     ext = os.path.splitext(file_name)[1].lower()
     try:
-        # Utilisation de pydub pour décoder de manière universelle (FLAC inclus)
-        audio = AudioSegment.from_file(io.BytesIO(file_bytes))
-        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
-        
-        # Gestion stéréo -> mono
-        if audio.channels == 2:
-            samples = samples.reshape(-1, 2).mean(axis=1)
-        
-        # Normalisation
-        y = samples / (2**(8 * audio.sample_width - 1))
-        sr = audio.frame_rate
-        
-        # Resampling si nécessaire
-        if sr != sr_target:
-            y = librosa.resample(y, orig_sr=sr, target_sr=sr_target)
-            sr = sr_target
-            
+        if ext == '.m4a':
+            audio = AudioSegment.from_file(io.BytesIO(file_bytes), format="m4a")
+            samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+            if audio.channels == 2:
+                samples = samples.reshape(-1, 2).mean(axis=1)
+            y = samples / (2**(8 * audio.sample_width - 1))
+            sr = audio.frame_rate
+            if sr != sr_target:
+                y = librosa.resample(y, orig_sr=sr, target_sr=sr_target)
+                sr = sr_target
+        else:
+            with io.BytesIO(file_bytes) as buf:
+                y, sr = librosa.load(buf, sr=sr_target, mono=True)
+
     except Exception as e:
         return {"error": f"Erreur de décodage ({ext}): {str(e)}"}
 
@@ -113,92 +118,136 @@ def process_audio(file_bytes, file_name, sr_target=22050):
     tuning = librosa.estimate_tuning(y=y, sr=sr)
     y_filt = apply_precision_filters(y, sr)
 
-    # 1. GLOBAL (70%)
+    # Analyse globale
     chroma_glob = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning), axis=1)
     bass_glob = np.mean(librosa.feature.chroma_cqt(y=butter_lowpass(y, sr), sr=sr), axis=1)
     global_scores = vote_profiles(chroma_glob, bass_glob)
 
-    # 2. SEGMENTS (30%) - 12s / 6s overlap
+    # Analyse par segments
     seg_size, overlap = 12, 6
     step = seg_size - overlap
     segment_votes = Counter()
+    segment_timeline = []
     valid_count = 0
 
     for start_s in range(0, int(duration) - seg_size, step):
         y_seg = y_filt[int(start_s * sr) : int((start_s + seg_size) * sr)]
-        if np.max(np.abs(y_seg)) < 0.02: continue
+        if np.max(np.abs(y_seg)) < 0.02: 
+            continue
         
         c_seg = np.mean(librosa.feature.chroma_cqt(y=y_seg, sr=sr, tuning=tuning), axis=1)
         b_seg = np.mean(librosa.feature.chroma_cqt(y=butter_lowpass(y_seg, sr), sr=sr), axis=1)
         
         seg_scores = vote_profiles(c_seg, b_seg)
         best_k = max(seg_scores, key=seg_scores.get)
-        if seg_scores[best_k] >= 0.80:
+        
+        if seg_scores[best_k] >= 0.75:
             weight = 1.3 if 0.25 < (start_s / duration) < 0.75 else 1.0
             segment_votes[best_k] += seg_scores[best_k] * weight
+            segment_timeline.append(best_k)
             valid_count += 1
 
+    # Détection modulation
+    modulation_detected = None
+    if len(segment_timeline) >= 4:
+        mid = len(segment_timeline) // 2
+        first_half_key = Counter(segment_timeline[:mid]).most_common(1)[0][0]
+        second_half_key = Counter(segment_timeline[mid:]).most_common(1)[0][0]
+        if first_half_key != second_half_key:
+            modulation_detected = second_half_key
+
+    # Score final pondéré
     if segment_votes:
         total_v = sum(segment_votes.values())
-        segment_votes = {k: v / total_v for k, v in segment_votes.items()}
+        segment_votes_norm = {k: v / total_v for k, v in segment_votes.items()}
+    else:
+        segment_votes_norm = {}
 
     final_results = Counter()
     for key in global_scores:
-        final_results[key] = (global_scores[key] * WEIGHTS["profiles_global"]) + (segment_votes.get(key, 0) * WEIGHTS["segments"])
+        final_results[key] = (global_scores[key] * WEIGHTS["profiles_global"]) + \
+                             (segment_votes_norm.get(key, 0) * WEIGHTS["segments"])
 
     best_key, best_score = final_results.most_common(1)[0]
     
     return {
-        "key": best_key, "camelot": CAMELOT_MAP.get(best_key, "??"),
-        "conf": best_score, "valid_seg": valid_count, "duration": duration, "tuning": tuning
+        "key": best_key, 
+        "camelot": CAMELOT_MAP.get(best_key, "??"),
+        "conf": best_score, 
+        "valid_seg": valid_count, 
+        "duration": duration, 
+        "tuning": tuning,
+        "modulation": modulation_detected
     }
 
 # ────────────────────────────────────────────────
 # INTERFACE
 # ────────────────────────────────────────────────
 
-st.title("🎵 Universal Key Detector (FLAC Supported)")
+st.title("🎵 Music Key Expert")
+
+# Barre de progression globale
+global_progress = st.progress(0)
+global_status = st.empty()
 
 bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN")
 chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
 
-uploaded_files = st.file_uploader("Audios (FLAC, MP3, WAV, M4A)", type=["flac", "mp3", "wav", "m4a"], accept_multiple_files=True)
+uploaded_files = st.file_uploader(
+    "Audios (FLAC, MP3, WAV, M4A)", 
+    type=["flac", "mp3", "wav", "m4a"], 
+    accept_multiple_files=True
+)
 
 if uploaded_files:
-    results_list = []
-    prog_bar = st.progress(0)
-    status_txt = st.empty()
+    n_files = len(uploaded_files)
+
+    global_progress.progress(0)
+    global_status.text(f"0 / {n_files} fichiers traités (0%)")
 
     for i, file in enumerate(uploaded_files, 1):
-        status_txt.write(f"Analyse & Auto-send : {file.name}...")
-        data = process_audio(file.getvalue(), file.name)
-        
+        percent = (i - 1) / n_files
+        global_progress.progress(percent)
+        global_status.text(f"{i-1} / {n_files} fichiers traités ({percent:.0%})")
+
+        with st.spinner(f"Analyse de {file.name} ({i}/{n_files})"):
+            data = process_audio(file.getvalue(), file.name)
+            gc.collect()  # Libération mémoire après chaque fichier
+
         if "error" not in data:
             data['name'] = file.name
-            results_list.append(data)
             
-            # Envoi Telegram
-            report = (f"🎵 *{file.name}*\n"
-                      f"Key: `{data['key']}` | Camelot: *{data['camelot']}*\n"
-                      f"Conf: {data['conf']:.3f} | Segments: {data['valid_seg']}")
+            mod_text = f"\n⚠️ *Modulation détectée :* `{data['modulation']}`" if data.get('modulation') else ""
+            report = (
+                f"🎵 *{file.name}*\n"
+                f"Key: `{data['key']}` | Camelot: *{data['camelot']}*\n"
+                f"Conf: **{data['conf']*100:.1f}%** | Segments: {data['valid_seg']}"
+                f"{mod_text}"
+            )
+            
             send_telegram_auto(report, bot_token, chat_id)
-            
-        prog_bar.progress(i / len(uploaded_files))
 
-    status_txt.success("Analyses terminées.")
+            # Affichage immédiat du résultat
+            st.markdown("---")
+            with st.container():
+                c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+                with c1:
+                    st.markdown(f"**{data['name']}**")
+                    st.caption(f"Format: {data['name'].split('.')[-1].upper()}  |  Tuning: {data['tuning']:+.2f}¢")
+                with c2:
+                    st.markdown(f"<h2 style='color:#f59e0b; margin:0; text-align:center;'>{data['camelot']}</h2>", unsafe_allow_html=True)
+                with c3:
+                    st.markdown(f"**{data['key']}**")
+                    if data.get('modulation'):
+                        mod_cam = CAMELOT_MAP.get(data['modulation'], "??")
+                        st.markdown(f"<p style='color:#ef4444; font-size:0.85em; margin-top:6px;'>→ Mod: {data['modulation']} ({mod_cam})</p>", unsafe_allow_html=True)
+                with c4:
+                    st.metric("Confiance", f"{data['conf']*100:.1f} %")
+                st.divider()
 
-    # AFFICHAGE LISTE
-    st.markdown("---")
-    for item in results_list:
-        with st.container():
-            c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-            with c1:
-                st.markdown(f"**{item['name']}**")
-                st.caption(f"Format: {item['name'].split('.')[-1].upper()} | Tuning: {item['tuning']:+.2f}")
-            with c2:
-                st.markdown(f"<h2 style='color:#f59e0b; margin:0;'>{item['camelot']}</h2>", unsafe_allow_html=True)
-            with c3:
-                st.markdown(f"**{item['key']}**")
-            with c4:
-                st.metric("Confiance", f"{item['conf']:.3f}")
-            st.divider()
+        percent = i / n_files
+        global_progress.progress(percent)
+        global_status.text(f"{i} / {n_files} fichiers traités ({percent:.0%})")
+
+    global_progress.progress(1.0)
+    global_status.success(f"Analyse terminée — {n_files} fichier(s) traité(s)")
