@@ -275,9 +275,34 @@ def process_audio_precision(file_bytes, file_name, progress_callback=None):
                 f"**Tempo**     `{result['tempo']} BPM`\n"
                 f"**Accordage** `{result['tuning_hz']} Hz  ({result['tuning_cents']:+.1f}¢)`\n"
                 f"**Segments valides**  `{valid_segments}`\n"
-                f"{'**MODULATION →** ' + modulation.upper() + f' ({result['target_camelot']})' if modulation else '**STABLE**'}\n"
-# Ou plus simplement pour éviter les f-strings imbriquées complexes :
-modulation_text = f"**MODULATION →** {modulation.upper()} ({result['target_camelot']})" if modulation else "**STABLE**"
+                # ── Préparation du message Telegram ──
+            mod_status = f"**MODULATION →** {modulation.upper()} ({result['target_camelot']})" if modulation else "**STABLE**"
+
+            caption = (
+                f"**RCDJ228 SNIPER M4 RAPPORT**\n━━━━━━━━━━━━━━\n"
+                f"**Fichier** `{file_name}`\n"
+                f"**Tonalité** `{best_key.upper()}`\n"
+                f"**Camelot** `{result['camelot']}`\n"
+                f"**Confiance** `{confidence}%`\n"
+                f"**Tempo** `{result['tempo']} BPM`\n"
+                f"**Accordage** `{result['tuning_hz']} Hz  ({result['tuning_cents']:+.1f}¢)`\n"
+                f"**Segments valides** `{valid_segments}`\n"
+                f"{mod_status}\n"
+                f"━━━━━━━━━━━━━━"
+            )
+
+            files = {
+                'p1': ('timeline.png', img_tl, 'image/png'),
+                'p2': ('radar.png', img_rd, 'image/png')
+            }
+            media = [
+                {'type': 'photo', 'media': 'attach://p1', 'caption': caption, 'parse_mode': 'Markdown'},
+                {'type': 'photo', 'media': 'attach://p2'}
+            ]
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMediaGroup",
+                data={'chat_id': CHAT_ID, 'media': json.dumps(media)},
+                files=files, timeout=20
             )
 
             files = {
