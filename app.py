@@ -276,7 +276,8 @@ def process_audio_precision(file_bytes, file_name, progress_callback=None):
                 f"**Accordage** `{result['tuning_hz']} Hz  ({result['tuning_cents']:+.1f}¢)`\n"
                 f"**Segments valides**  `{valid_segments}`\n"
                 f"{'**MODULATION →** ' + modulation.upper() + f' ({result['target_camelot']})' if modulation else '**STABLE**'}\n"
-                f"━━━━━━━━━━━━━━"
+# Ou plus simplement pour éviter les f-strings imbriquées complexes :
+modulation_text = f"**MODULATION →** {modulation.upper()} ({result['target_camelot']})" if modulation else "**STABLE**"
             )
 
             files = {
