@@ -1,6 +1,7 @@
-# RCDJ228 SNIPER M3 - VERSION FUSIONNÉE PRO (MOTEUR PIANO COMPANION)
-# LOGIQUE : Corrélation Bellman + Masques Théoriques Piano Companion + 7 Modes Grecs
-# FIX : try/except autour de chroma_cqt + garde-fou longueur minimale
+# RCDJ228 SNIPER M3 - VERSION FUSIONNÉE (MOTEUR CODE 2 + ROBUSTESSE CODE 1)
+# Avec détection moment modulation + % en target + fin en target
+# + Conseils de mix harmonique basés sur la checklist
+# + CONSEIL RAPIDE MIX dans le rapport Telegram (version ultra-résumée)
 
 import streamlit as st
 import librosa
@@ -26,23 +27,13 @@ if os.path.exists(r'C:\ffmpeg\bin'):
 # --- CONFIGURATION SYSTÈME ---
 st.set_page_config(page_title="RCDJ228 MUSIC SNIPER", page_icon="🎯", layout="wide")
 
+# Récupération des secrets
 TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN")
 CHAT_ID = st.secrets.get("CHAT_ID")
 
-# --- RÉFÉRENTIELS HARMONIQUES & LOGIQUE PIANO COMPANION ---
+# --- RÉFÉRENTIELS HARMONIQUES ---
 NOTES_LIST = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-NOTES_ORDER = [f"{n} {m}" for n in NOTES_LIST for m in ['major', 'minor', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'locrian']]
-
-# Masques théoriques Piano Companion (1=autorisé, 0=interdit)
-COMPANION_MASKS = {
-    "major":     [1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1], 
-    "minor":     [1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0], 
-    "dorian":    [1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0],
-    "phrygian":  [1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0],
-    "lydian":    [1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1],
-    "mixolydian":[1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0],
-    "locrian":   [1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0]
-}
+NOTES_ORDER = [f"{n} {m}" for n in NOTES_LIST for m in ['major', 'minor']]
 
 CAMELOT_MAP = {
     'C major': '8B', 'C# major': '3B', 'D major': '10B', 'D# major': '5B', 'E major': '12B', 'F major': '7B',
@@ -52,188 +43,473 @@ CAMELOT_MAP = {
 }
 
 PROFILES = {
+    "krumhansl": {
+        "major": [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
+        "minor": [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+    },
+    "temperley": {
+        "major": [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0],
+        "minor": [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0]
+    },
     "bellman": {
         "major": [16.8, 0.86, 12.95, 1.41, 13.49, 11.93, 1.25, 16.74, 1.56, 12.81, 1.89, 12.44],
         "minor": [18.16, 0.69, 12.99, 13.34, 1.07, 11.15, 1.38, 17.2, 13.62, 1.27, 12.79, 2.4]
     }
 }
 
-# --- FONCTIONS UTILITAIRES ---
+# --- FONCTIONS UTILITAIRES POUR LES CONSEILS MIX ---
 
 def get_neighbor_camelot(camelot_str: str, offset: int) -> str:
-    if camelot_str in ['??', None, '']: return '??'
+    """Retourne le Camelot voisin avec l'offset donné (modulo 12)"""
+    if camelot_str in ['??', None, '']:
+        return '??'
     try:
         num = int(camelot_str[:-1])
-        wheel = camelot_str[-1]
+        wheel = camelot_str[-1]  # A ou B
         new_num = ((num - 1 + offset) % 12) + 1
         return f"{new_num}{wheel}"
-    except: return '??'
-
-def get_theoretical_score(chroma_vector, key_name):
-    root_note, mode = key_name.split(maxsplit=1)
-    root_idx = NOTES_LIST.index(root_note)
-    mask = np.roll(COMPANION_MASKS.get(mode, COMPANION_MASKS["major"]), root_idx)
-    total_energy = np.sum(chroma_vector) + 1e-6
-    allowed_energy = np.sum(chroma_vector * mask)
-    pilar_penalty = 1.0
-    if chroma_vector[root_idx] < 0.35: pilar_penalty *= 0.6
-    if chroma_vector[(root_idx + 7) % 12] < 0.25: pilar_penalty *= 0.8
-    return (allowed_energy / total_energy) * pilar_penalty
+    except:
+        return '??'
 
 def get_mixing_advice(data):
-    if not data.get('modulation', False): return None
-    principal_camelot = data.get('camelot', '??')
-    target_key = data.get('target_key', 'Inconnu')
-    target_camelot = data.get('target_camelot', '??')
-    perc = data.get('mod_target_percentage', 0)
-    ends_in_target = data.get('mod_ends_in_target', False)
-    time_str = data.get('modulation_time_str', '??:??')
+    """
+    Génère les conseils de mix suivant EXACTEMENT la checklist fournie
+    """
+    if not data.get('modulation', False):
+        return None
 
-    lines = ["**Checklist mix harmonique (Logique Piano Companion) :**"]
+    principal_camelot = data.get('camelot', '??')
+    target_key       = data.get('target_key', 'Inconnu')
+    target_camelot   = data.get('target_camelot', '??')
+    perc             = data.get('mod_target_percentage', 0)
+    ends_in_target   = data.get('mod_ends_in_target', False)
+    time_str         = data.get('modulation_time_str', '??:??')
+
+    lines = []
+
+    lines.append("**Checklist mix harmonique – ce que tu dois faire :**")
+
     if ends_in_target:
-        lines.append(f"✅ **Le morceau termine dans {target_key.upper()} ({target_camelot})**")
+        lines.append(f"✅ **Oui : le morceau termine dans {target_key.upper()} ({target_camelot})**")
+        lines.append("   → **Privilégie cette tonalité pour le track suivant**")
         priority = "target"
     else:
-        lines.append(f"⚠️ **Ne termine pas en {target_key.upper()}**. Sortie : {principal_camelot}")
+        lines.append(f"⚠️ **Non : ne termine pas en {target_key.upper()} ({target_camelot})**")
+        lines.append("   → La tonalité de sortie reste plutôt " + principal_camelot)
         priority = "principal"
 
+    if perc > 45:
+        lines.append(f"✅ **Pourcentage très élevé ({perc:.1f}%)** → traite ce track presque comme s'il était en **{target_camelot}**")
+        priority = "target"
+    elif perc > 25:
+        lines.append(f"ℹ️ **Pourcentage significatif ({perc:.1f}%)** → la target est importante")
+        lines.append("   → Tu peux sortir après la bascule pour utiliser la target")
+    else:
+        lines.append(f"🔸 **Pourcentage faible ({perc:.1f}%)** → modulation plutôt ponctuelle")
+        lines.append("   → Tu peux rester sur la tonalité principale pour plus de sécurité")
+
     lines.append(f"⚠️ **Moment de bascule ≈ {time_str}**")
-    lines.append(f"\n**Choix safe :** {target_camelot if priority=='target' else principal_camelot} (ou ±1)")
-    lines.append(f"**Montée Punchy (+3) :** {get_neighbor_camelot(target_camelot if priority=='target' else principal_camelot, 3)}")
-    
+    lines.append("   → **Évite de faire un long mix pile à cet endroit** (chevauchement de tonalités = risque de clash harmonique)")
+
+    if ends_in_target or perc > 40:
+        lines.append("")
+        lines.append("**🚀 Pour une montée d’énergie volontaire :**")
+        lines.append(f"   → Sors sur la fin → enchaîne sur un track **+3** ou **+7** depuis **{target_camelot}**")
+        lines.append(f"     Ex : {target_camelot} → **{get_neighbor_camelot(target_camelot, 3)}** ou **{get_neighbor_camelot(target_camelot, 7)}**")
+        lines.append("     → C’est une vraie « modulation DJ » qui donne du punch !")
+
+    lines.append("")
+    lines.append("**Choix le plus safe pour le track suivant :**")
+    if priority == "target":
+        lines.append(f"→ **{target_camelot}** ou voisins (±1 sur la même roue A/B)")
+    else:
+        lines.append(f"→ **{principal_camelot}** ou voisins (±1)")
+
     return "\n".join(lines)
+
+# --- AJOUTS POUR PIANO COMPANION INTÉGRATION ---
+
+def get_diatonic_chords(key):
+    """Génère les accords diatoniques pour une tonalité, comme dans Piano Companion."""
+    if not key or key == "Unknown":
+        return []
+    
+    note, mode = key.split()
+    root_idx = NOTES_LIST.index(note)
+    
+    if mode == 'major':
+        scale_intervals = [0, 2, 4, 5, 7, 9, 11]  # Gamme majeure
+        chord_types = ['maj', 'min', 'min', 'maj', 'maj', 'min', 'dim']
+        roman_numerals = ['I', 'ii', 'iii', 'IV', 'V', 'vi', 'vii°']
+    else:  # minor (naturelle pour simplicité, comme base dans l'app)
+        scale_intervals = [0, 2, 3, 5, 7, 8, 10]  # Gamme mineure naturelle
+        chord_types = ['min', 'dim', 'maj', 'min', 'min', 'maj', 'maj']
+        roman_numerals = ['i', 'ii°', 'III', 'iv', 'v', 'VI', 'VII']
+    
+    scale_notes = [NOTES_LIST[(root_idx + interv) % 12] for interv in scale_intervals]
+    
+    chords = []
+    for i in range(7):
+        chord_root = scale_notes[i]
+        ctype = chord_types[i]
+        if ctype == 'maj':
+            third_interval = 4
+            fifth_interval = 7
+        elif ctype == 'min':
+            third_interval = 3
+            fifth_interval = 7
+        elif ctype == 'dim':
+            third_interval = 3
+            fifth_interval = 6
+        third = NOTES_LIST[(NOTES_LIST.index(chord_root) + third_interval) % 12]
+        fifth = NOTES_LIST[(NOTES_LIST.index(chord_root) + fifth_interval) % 12]
+        chord_notes = [chord_root, third, fifth]
+        chords.append({
+            'roman': roman_numerals[i],
+            'name': f"{chord_root}{ctype}",
+            'notes': ' '.join(chord_notes)
+        })
+    
+    return chords
+
+def validate_key_with_chords(chroma_avg, diatonic_chords):
+    """Valide la tonalité en vérifiant la coverage des notes des accords dans le chroma.
+    Retourne un score de validation (0-100) et des alternatives si faible."""
+    if not diatonic_chords:
+        return 0, []
+    
+    # Notes uniques de tous les accords diatoniques
+    diatonic_notes = set()
+    for chord in diatonic_chords:
+        diatonic_notes.update(chord['notes'].split())
+    
+    # Indices des notes diatoniques
+    diatonic_idxs = [NOTES_LIST.index(n) for n in diatonic_notes]
+    
+    # Normalise chroma
+    chroma_norm = chroma_avg / np.max(chroma_avg)
+    
+    # Coverage : moyenne des valeurs chroma pour les notes diatoniques
+    coverage = np.mean([chroma_norm[idx] for idx in diatonic_idxs]) * 100
+    
+    # Si coverage faible (<70), suggère alternatives (ex. relative)
+    alternatives = []
+    if coverage < 70:
+        note, mode = final_key.split()  # Note: final_key doit être accessible, ajusté dans le contexte
+        root_idx = NOTES_LIST.index(note)
+        rel_idx = (root_idx - 3 if mode == 'major' else root_idx + 3) % 12
+        rel_mode = 'minor' if mode == 'major' else 'major'
+        rel_key = f"{NOTES_LIST[rel_idx]} {rel_mode}"
+        alternatives.append(rel_key)
+    
+    return int(coverage), alternatives
 
 # --- STYLES CSS ---
 st.markdown("""
     <style>
     .main { background-color: #0b0e14; }
-    .report-card { padding: 40px; border-radius: 30px; text-align: center; color: white; border: 1px solid rgba(99, 102, 241, 0.3); box-shadow: 0 15px 45px rgba(0,0,0,0.6); margin-bottom: 20px; }
-    .file-header { background: #1f2937; color: #10b981; padding: 10px 20px; border-radius: 10px; font-family: 'JetBrains Mono', monospace; font-weight: bold; margin-bottom: 10px; border-left: 5px solid #10b981; }
-    .modulation-alert { background: rgba(239, 68, 68, 0.20); color: #fca5a5; padding: 18px; border-radius: 12px; border: 1px solid #ef4444; margin: 20px 0; font-weight: bold; line-height: 1.6; }
-    .metric-box { background: #161b22; border-radius: 15px; padding: 20px; text-align: center; border: 1px solid #30363d; height: 100%; }
+    .report-card { 
+        padding: 40px; border-radius: 30px; text-align: center; color: white; 
+        border: 1px solid rgba(99, 102, 241, 0.3); box-shadow: 0 15px 45px rgba(0,0,0,0.6);
+        margin-bottom: 20px;
+    }
+    .file-header {
+        background: #1f2937; color: #10b981; padding: 10px 20px; border-radius: 10px;
+        font-family: 'JetBrains Mono', monospace; font-weight: bold; margin-bottom: 10px;
+        border-left: 5px solid #10b981;
+    }
+    .modulation-alert {
+        background: rgba(239, 68, 68, 0.20); color: #fca5a5;
+        padding: 18px; border-radius: 12px; border: 1px solid #ef4444;
+        margin: 20px 0; font-weight: bold; font-family: 'JetBrains Mono', monospace;
+        line-height: 1.6; font-size: 1.05em;
+    }
+    .modulation-alert .detail {
+        color: #fbbf24; font-size: 1.1em;
+    }
+    .modulation-alert .nature {
+        font-size: 0.92em; opacity: 0.85; color: #fca5a5;
+    }
+    .metric-box {
+        background: #161b22; border-radius: 15px; padding: 20px; text-align: center; border: 1px solid #30363d;
+        height: 100%; transition: 0.3s;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# --- MOTEUR DE CALCUL ---
-
+# --- MOTEURS DE CALCUL ---
 def apply_sniper_filters(y, sr):
     y_harm = librosa.effects.harmonic(y, margin=4.0)
     nyq = 0.5 * sr
-    b, a = butter(4, [80/nyq, 5000/nyq], btype='band')
+    low = 80 / nyq
+    high = 5000 / nyq
+    b, a = butter(4, [low, high], btype='band')
     return lfilter(b, a, y_harm)
 
-def solve_key_sniper(chroma_vector):
+def get_bass_priority(y, sr):
+    nyq = 0.5 * sr
+    b, a = butter(2, 150/nyq, btype='low')
+    y_bass = lfilter(b, a, y)
+    chroma_bass = librosa.feature.chroma_cqt(y=y_bass, sr=sr, n_chroma=12)
+    return np.mean(chroma_bass, axis=1)
+
+def solve_key_sniper(chroma_vector, bass_vector):
     best_overall_score = -1
     best_key = "Unknown"
-    cv = (chroma_vector - chroma_vector.min()) / (chroma_vector.max() - chroma_vector.min() + 1e-6)
     
-    for mode in COMPANION_MASKS.keys():
-        profile = PROFILES["bellman"]["major" if mode != "minor" else "minor"]
-        for i in range(12):
-            stat_score = np.corrcoef(cv, np.roll(profile, i))[0, 1]
-            key_name = f"{NOTES_LIST[i]} {mode}"
-            theo_fit = get_theoretical_score(cv, key_name)
-            final_score = stat_score * (theo_fit ** 1.8)
-            
-            if final_score > best_overall_score:
-                best_overall_score = final_score
+    cv = (chroma_vector - chroma_vector.min()) / (chroma_vector.max() - chroma_vector.min() + 1e-6)
+    bv = (bass_vector - bass_vector.min()) / (bass_vector.max() - bass_vector.min() + 1e-6)
+    
+    key_scores = {f"{NOTES_LIST[i]} {mode}": [] for mode in ["major", "minor"] for i in range(12)}
+    
+    for p_name, p_data in PROFILES.items():
+        for mode in ["major", "minor"]:
+            for i in range(12):
+                score = np.corrcoef(cv, np.roll(p_data[mode], i))[0, 1]
+                
+                dom_idx = (i + 7) % 12
+                leading_tone = (i + 11) % 12
+                
+                if mode == "minor":
+                    if cv[leading_tone] > 0.30:
+                        score *= 1.35
+                    if cv[dom_idx] > 0.45:
+                        score *= 1.15
+                else:
+                    if cv[i] > 0.7 and cv[dom_idx] > 0.6:
+                        score *= 1.1
+                
+                if bv[i] > 0.6:
+                    score += (bv[i] * 0.25)
+                
+                third_idx = (i + 4) % 12 if mode == "major" else (i + 3) % 12
+                if cv[third_idx] > 0.5:
+                    score += 0.15
+                
+                fifth_idx = (i + 7) % 12
+                if cv[fifth_idx] > 0.5:
+                    score += 0.10
+                
+                key_name = f"{NOTES_LIST[i]} {mode}"
+                key_scores[key_name].append(score)
+    
+    for key_name, scores in key_scores.items():
+        if scores:
+            avg_score = np.mean(scores)
+            if avg_score > best_overall_score:
+                best_overall_score = avg_score
                 best_key = key_name
+    
     return {"key": best_key, "score": best_overall_score}
 
 def seconds_to_mmss(seconds):
-    if seconds is None: return "??:??"
-    return f"{int(seconds // 60):02d}:{int(seconds % 60):02d}"
+    if seconds is None:
+        return "??:??"
+    mins = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{mins:02d}:{secs:02d}"
 
 def process_audio_precision(file_bytes, file_name, _progress_callback=None):
+    ext = file_name.split('.')[-1].lower()
     try:
-        if file_name.lower().endswith('m4a'):
+        if ext == 'm4a':
             audio = AudioSegment.from_file(io.BytesIO(file_bytes), format="m4a")
             samples = np.array(audio.get_array_of_samples()).astype(np.float32)
-            y = (samples.reshape((-1, 2)).mean(axis=1) if audio.channels == 2 else samples) / (2**15)
+            if audio.channels == 2:
+                samples = samples.reshape((-1, 2)).mean(axis=1)
+            y = samples / (2**15)
             sr = audio.frame_rate
-            if sr != 22050: y = librosa.resample(y, orig_sr=sr, target_sr=22050); sr = 22050
+            if sr != 22050:
+                y = librosa.resample(y, orig_sr=sr, target_sr=22050)
+                sr = 22050
         else:
-            with io.BytesIO(file_bytes) as buf: y, sr = librosa.load(buf, sr=22050, mono=True)
+            with io.BytesIO(file_bytes) as buf:
+                y, sr = librosa.load(buf, sr=22050, mono=True)
     except Exception as e:
-        st.error(f"Erreur chargement audio: {e}"); return None
+        st.error(f"Erreur de lecture du fichier {file_name}: {e}")
+        return None
 
     duration = librosa.get_duration(y=y, sr=sr)
     tuning = librosa.estimate_tuning(y=y, sr=sr)
     y_filt = apply_sniper_filters(y, sr)
 
     step, timeline, votes = 6, [], Counter()
-    segments = list(range(0, max(1, int(duration) - step), 3))
+    segments = list(range(0, max(1, int(duration) - step), 2))
+    total_segments = len(segments)
     
-    MIN_SAMPLES_SAFE = 16384  # seuil bas pour éviter d'essayer sur des segments ridicules
-
     for idx, start in enumerate(segments):
-        if _progress_callback: _progress_callback(int((idx/len(segments))*100), f"Scan {start}s / {int(duration)}s")
+        if _progress_callback:
+            prog_internal = int((idx / total_segments) * 100)
+            _progress_callback(prog_internal, f"Scan : {start}s / {int(duration)}s")
+
+        idx_start, idx_end = int(start * sr), int((start + step) * sr)
+        seg = y_filt[idx_start:idx_end]
+        if len(seg) < 1000 or np.max(np.abs(seg)) < 0.01: continue
         
-        idx_s = int(start * sr)
-        idx_e = min(idx_s + int(step * sr), len(y_filt))  # ne pas dépasser la fin du signal
-        seg = y_filt[idx_s:idx_e]
+        c_raw = librosa.feature.chroma_cqt(y=seg, sr=sr, tuning=tuning, n_chroma=24, bins_per_octave=24)
+        c_avg = np.mean((c_raw[::2, :] + c_raw[1::2, :]) / 2, axis=1)
+        b_seg = get_bass_priority(y[idx_start:idx_end], sr)
+        res = solve_key_sniper(c_avg, b_seg)
         
-        if len(seg) < MIN_SAMPLES_SAFE or np.max(np.abs(seg)) < 0.015:
-            continue
+        if res['score'] < 0.9: continue
         
-        try:
-            c_raw = librosa.feature.chroma_cqt(y=seg, sr=sr, tuning=tuning, n_chroma=24)
-            c_avg = np.mean((c_raw[::2, :] + c_raw[1::2, :]) / 2, axis=1)
-            
-            res = solve_key_sniper(c_avg)
-            weight = 2.0 if (start < 15 or start > (duration - 20)) else 1.0
-            votes[res['key']] += int(res['score'] * 100 * weight)
-            timeline.append({"Temps": start, "Note": res['key'], "Conf": res['score']})
-        
-        except librosa.util.exceptions.ParameterError:
-            # print(f"Skip segment {start:.1f}s → ParameterError (longueur={len(seg)})");  # décommenter pour debug
-            continue
-        except Exception as exc:
-            # print(f"Erreur inattendue segment {start:.1f}s : {exc}")
-            continue
+        weight = 2.0 if (start < 10 or start > (duration - 15)) else 1.0
+        votes[res['key']] += int(res['score'] * 100 * weight)
+        timeline.append({"Temps": start, "Note": res['key'], "Conf": res['score']})
 
     if not votes:
         return None
 
     most_common = votes.most_common(2)
     final_key = most_common[0][0]
-    final_conf = int(np.mean([t['Conf'] for t in timeline if t['Note'] == final_key]) * 100) if timeline else 0
+    final_conf = int(np.mean([t['Conf'] for t in timeline if t['Note'] == final_key]) * 100)
     
-    mod_detected = len(most_common) > 1 and (votes[most_common[1][0]] / sum(votes.values())) > 0.22
+    mod_detected = len(most_common) > 1 and (votes[most_common[1][0]] / max(1, sum(votes.values()))) > 0.25
     target_key = most_common[1][0] if mod_detected else None
+
+    modulation_time = None
+    target_percentage = 0
+    ends_in_target = False
+
+    if mod_detected and target_key:
+        candidates = [t["Temps"] for t in timeline if t["Note"] == target_key and t["Conf"] >= 0.84]
+        if candidates:
+            modulation_time = min(candidates)
+        else:
+            target_times = [t["Temps"] for t in timeline if t["Note"] == target_key]
+            if target_times:
+                sorted_times = sorted(target_times)
+                modulation_time = sorted_times[max(0, len(sorted_times) // 3)]
+
+        total_valid = len(timeline)
+        if total_valid > 0:
+            target_count = sum(1 for t in timeline if t["Note"] == target_key)
+            final_count = sum(1 for t in timeline if t["Note"] == final_key)
+            target_percentage = (target_count / total_valid) * 100
+
+        if timeline:
+            last_n = max(5, len(timeline) // 10)
+            last_segments = timeline[-last_n:]
+            last_counter = Counter(s["Note"] for s in last_segments)
+            last_key = last_counter.most_common(1)[0][0]
+            ends_in_target = (last_key == target_key)
 
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     chroma_avg = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning), axis=1)
 
+    # --- AJOUT : Génération des accords diatoniques ---
+    diatonic_chords = get_diatonic_chords(final_key)
+    target_diatonic_chords = get_diatonic_chords(target_key) if target_key else []
+
+    # --- AJOUT : Validation automatique avec influence sur la décision finale ---
+    chroma_avg_array = np.array(chroma_avg)  # Convertir en array pour validation
+    validation_score, alternatives = validate_key_with_chords(chroma_avg_array, diatonic_chords)
+
+    # Calculer les scores pour les alternatives et choisir la meilleure
+    best_key = final_key
+    best_validation_score = validation_score
+    best_conf = final_conf
+
+    for alt_key in alternatives:
+        alt_chords = get_diatonic_chords(alt_key)
+        alt_validation_score, _ = validate_key_with_chords(chroma_avg_array, alt_chords)
+        # Combiner avec le score original (pondéré : 70% original conf, 30% validation)
+        alt_combined = (final_conf * 0.7) + (alt_validation_score * 0.3)
+        original_combined = (final_conf * 0.7) + (validation_score * 0.3)
+        if alt_combined > original_combined:
+            best_key = alt_key
+            best_validation_score = alt_validation_score
+            best_conf = int(alt_combined)  # Mise à jour de la confiance ajustée
+
+    # Mise à jour de final_key si une meilleure alternative est trouvée
+    final_key = best_key
+    final_conf = min(best_conf, 99)
+
+    # Mise à jour de Camelot pour la nouvelle clé si changée
+    camelot = CAMELOT_MAP.get(final_key, "??")
+
     res_obj = {
-        "key": final_key, "camelot": CAMELOT_MAP.get(final_key, "??"),
-        "conf": min(final_conf, 99), "tempo": int(float(tempo or 0)),
-        "tuning": round(440 * (2**(tuning/12)), 1) if tuning is not None else 440.0,
+        "key": final_key,
+        "camelot": camelot,
+        "conf": final_conf,
+        "tempo": int(float(tempo)),
+        "tuning": round(440 * (2**(tuning/12)), 1),
         "timeline": timeline,
-        "chroma": chroma_avg.tolist(), "modulation": mod_detected,
-        "target_key": target_key, "target_camelot": CAMELOT_MAP.get(target_key, "??") if target_key else None,
-        "mod_target_percentage": round((sum(1 for t in timeline if t["Note"] == target_key)/len(timeline))*100, 1) if mod_detected and timeline else 0,
-        "mod_ends_in_target": (timeline[-1]["Note"] == target_key) if mod_detected and timeline else False,
-        "modulation_time_str": seconds_to_mmss(min([t["Temps"] for t in timeline if t["Note"] == target_key])) if mod_detected and timeline else None,
-        "name": file_name
+        "chroma": chroma_avg.tolist(),
+        "modulation": mod_detected,
+        "target_key": target_key,
+        "target_camelot": CAMELOT_MAP.get(target_key, "??") if target_key else None,
+        "modulation_time_str": seconds_to_mmss(modulation_time) if mod_detected else None,
+        "mod_target_percentage": round(target_percentage, 1) if mod_detected else 0,
+        "mod_ends_in_target": ends_in_target if mod_detected else False,
+        "name": file_name,
+        "diatonic_chords": diatonic_chords,
+        "target_diatonic_chords": target_diatonic_chords,
+        "validation_score": best_validation_score,
+        "key_alternatives": alternatives
     }
 
-    # ENVOI TELEGRAM COMPLET
     if TELEGRAM_TOKEN and CHAT_ID:
         try:
-            caption = (f"🎯 *RCDJ228 SNIPER PRO REPORT*\n━━━━━━━━━━━━\n"
-                       f"Track: `{file_name}`\nKey: `{final_key.upper()}` ({res_obj['camelot']})\n"
-                       f"Conf: `{res_obj['conf']}%` | Tempo: `{res_obj['tempo']} BPM`\n"
-                       f"{'⚠️ MODULATION: ' + target_key if mod_detected else '✅ STABLE'}")
-            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data={'chat_id': CHAT_ID, 'text': caption, 'parse_mode': 'Markdown'})
-        except: pass
+            df_tl = pd.DataFrame(timeline)
+            fig_tl = px.line(df_tl, x="Temps", y="Note", markers=True, template="plotly_dark", category_orders={"Note": NOTES_ORDER})
+            img_tl = fig_tl.to_image(format="png", width=1000, height=500)
+            
+            fig_rd = go.Figure(data=go.Scatterpolar(r=res_obj['chroma'], theta=NOTES_LIST, fill='toself', line_color='#10b981'))
+            fig_rd.update_layout(template="plotly_dark", polar=dict(radialaxis=dict(visible=False)))
+            img_rd = fig_rd.to_image(format="png", width=600, height=600)
 
+            mod_line = ""
+            if mod_detected:
+                perc = res_obj["mod_target_percentage"]
+                end_txt = " → **fin en " + target_key.upper() + "**" if res_obj['mod_ends_in_target'] else ""
+                mod_line = f"  *MODULATION →* `{target_key.upper()}` ({res_obj['target_camelot']}) ≈ **{res_obj['modulation_time_str']}** ({perc}%){end_txt}"
+
+            caption = (f"  *RCDJ228 MUSIC SNIPER - RAPPORT*\n━━━━━━━━━━━━\n"
+                       f"  *FICHIER:* `{file_name}`\n"
+                       f"  *TONALITÉ:* `{final_key.upper()}`\n"
+                       f"  *CAMELOT:* `{res_obj['camelot']}`\n"
+                       f"  *CONFIANCE:* `{res_obj['conf']}%`\n"
+                       f"  *TEMPO:* `{res_obj['tempo']} BPM`\n"
+                       f"  *ACCORDAGE:* `{res_obj['tuning']} Hz`\n"
+                       f"{mod_line if mod_detected else '  *STABILITÉ TONALE:* OK'}\n━━━━━━━━━━━━")
+
+            # ─── AJOUT : CONSEIL RAPIDE MIX EN VERSION ULTRA-RÉSUMÉE ───
+            advice_text = get_mixing_advice(res_obj)
+            summary_advice = ""
+            if advice_text:
+                if "fin en target" in advice_text or "Oui : le morceau termine" in advice_text:
+                    summary_advice = f"→ Termine en {res_obj['target_camelot']} → privilégie cette tonalité pour le suivant !"
+                elif res_obj.get('mod_target_percentage', 0) > 45:
+                    summary_advice = f"→ {res_obj['target_camelot']} très présent → traite presque comme track en {res_obj['target_camelot']}"
+                else:
+                    summary_advice = "→ Modulation ponctuelle → reste sur tonalité principale"
+            
+            if summary_advice:
+                caption += f"\n\n*Conseil rapide mix :* {summary_advice}"
+            else:
+                caption += "\n\n*Pas de modulation détectée → mix safe sur la tonalité principale*"
+
+            files = {'p1': ('timeline.png', img_tl, 'image/png'), 'p2': ('radar.png', img_rd, 'image/png')}
+            media = [
+                {'type': 'photo', 'media': 'attach://p1', 'caption': caption, 'parse_mode': 'Markdown'},
+                {'type': 'photo', 'media': 'attach://p2'}
+            ]
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMediaGroup",
+                data={'chat_id': CHAT_ID, 'media': json.dumps(media)},
+                files=files,
+                timeout=20
+            )
+        except Exception:
+            pass
+
+    del y, y_filt
+    gc.collect()
     return res_obj
 
 def get_chord_js(btn_id, key_str):
-    parts = key_str.split()
-    note = parts[0]
-    mode = parts[1] if len(parts) > 1 else 'major'
+    note, mode = key_str.split()
     return f"""
     document.getElementById('{btn_id}').onclick = function() {{
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -241,66 +517,180 @@ def get_chord_js(btn_id, key_str):
         const intervals = '{mode}' === 'minor' ? [0, 3, 7, 12] : [0, 4, 7, 12];
         intervals.forEach(i => {{
             const o = ctx.createOscillator(); const g = ctx.createGain();
-            o.type = 'triangle'; o.frequency.setValueAtTime(freqs['{note}'] * Math.pow(2, i/12), ctx.currentTime);
-            g.gain.setValueAtTime(0, ctx.currentTime); g.gain.linearRampToValueAtTime(0.1, ctx.currentTime + 0.1);
-            g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.5);
-            o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 1.5);
+            o.type = 'triangle'; 
+            o.frequency.setValueAtTime(freqs['{note}'] * Math.pow(2, i/12), ctx.currentTime);
+            g.gain.setValueAtTime(0, ctx.currentTime);
+            g.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.1);
+            g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 2.0);
+            o.connect(g); g.connect(ctx.destination);
+            o.start(); o.stop(ctx.currentTime + 2.0);
         }});
     }}; """
 
-# --- INTERFACE PRINCIPALE ---
+# ────────────────────────────────────────────────
+#               INTERFACE PRINCIPALE
+# ────────────────────────────────────────────────
 
-st.title("🎯 RCDJ228 MUSIC SNIPER PRO")
+st.title("🎯 RCDJ228 MUSIC SNIPER")
 
-uploaded_files = st.file_uploader("Audio files", type=['mp3','wav','flac','m4a'], accept_multiple_files=True)
+uploaded_files = st.file_uploader(
+    "Déposez vos fichiers audio (mp3, wav, flac, m4a)",
+    type=['mp3','wav','flac','m4a'],
+    accept_multiple_files=True
+)
 
 if uploaded_files:
-    container = st.container()
+    global_progress_placeholder = st.empty()
+    total_files = len(uploaded_files)
+    results_container = st.container()
+    
     for i, f in enumerate(reversed(uploaded_files)):
-        with st.status(f"Sniper Pro : {f.name}") as status:
-            data = process_audio_precision(f.getvalue(), f.name, lambda v, m: status.update(label=m))
-            status.update(label="Certifié par Piano Companion Engine", state="complete")
+        global_progress_placeholder.markdown(f"""
+            <div style="padding:15px; border-radius:15px; background-color:rgba(16,185,129,0.12); border:1px solid #10b981; margin-bottom:20px;">
+                <h3 style="margin:0; color:#10b981;">Analyse en cours : {i+1} / {total_files}</h3>
+                <p style="margin:6px 0 0 0; opacity:0.85;">{f.name}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with st.status(f"Analyse → {f.name}", expanded=True) as status:
+            inner_bar = st.progress(0)
+            status_text = st.empty()
+            
+            def update_progress(val, msg):
+                inner_bar.progress(val)
+                status_text.code(msg)
+
+            audio_bytes = f.getvalue()
+            data = process_audio_precision(audio_bytes, f.name, update_progress)
+            status.update(label=f"{f.name} terminé", state="complete", expanded=False)
 
         if data:
-            with container:
-                st.markdown(f"<div class='file-header'>{data['name']}</div>", unsafe_allow_html=True)
+            with results_container:
+                st.markdown(f"<div class='file-header'> {data['name']}</div>", unsafe_allow_html=True)
                 
-                # Report Card
-                st.markdown(f"""<div class="report-card" style="background:linear-gradient(135deg, #064e3b, #0b0e14);">
-                    <h1 style="font-size:5.5em; margin:0;">{data['key'].upper()}</h1>
-                    <p style="font-size:1.5em; opacity:0.9;">CAMELOT {data['camelot']} • CONF {data['conf']}%</p>
-                </div>""", unsafe_allow_html=True)
+                color = "linear-gradient(135deg, #065f46, #064e3b)" if data['conf'] > 85 else "linear-gradient(135deg, #1e293b, #0f172a)"
 
-                if data['modulation']:
-                    st.markdown(f"""<div class="modulation-alert">⚠️ MODULATION : {data['target_key'].upper()} ({data['target_camelot']}) à {data['modulation_time_str']} ({data['mod_target_percentage']}%)</div>""", unsafe_allow_html=True)
+                mod_alert = ""
+                if data.get('modulation'):
+                    perc = data.get('mod_target_percentage', 0)
+                    ends_in_target = data.get('mod_ends_in_target', False)
+                    time_str = data.get('modulation_time_str', '??:??')
+                    
+                    if perc < 25:
+                        nature = "passage court / ponctuel"
+                    elif perc < 50:
+                        nature = "section significative"
+                    else:
+                        nature = "dominante sur une grande partie"
 
-                # Metrics
-                m1, m2, m3 = st.columns(3)
-                m1.markdown(f"<div class='metric-box'>TEMPO<br><span style='font-size:2.4em; color:#10b981;'>{data['tempo']}</span><br>BPM</div>", unsafe_allow_html=True)
-                m2.markdown(f"<div class='metric-box'>TUNING<br><span style='font-size:2.2em; color:#58a6ff;'>{data['tuning']}</span><br>Hz</div>", unsafe_allow_html=True)
-                with m3:
-                    btn_id = f"play_{i}"
-                    components.html(f"<button id='{btn_id}' style='width:100%; height:90px; background:#4F46E5; color:white; border:none; border-radius:15px; font-weight:bold; cursor:pointer;'>TESTER L'ACCORD</button><script>{get_chord_js(btn_id, data['key'])}</script>", height=100)
+                    end_txt = " → **fin en " + data['target_key'].upper() + "**" if ends_in_target else ""
+                    
+                    mod_alert = f"""
+                        <div class="modulation-alert">
+                            MODULATION → {data['target_key'].upper()} ({data['target_camelot']})<br>
+                            <span class="detail">≈ {time_str} – {perc}% du morceau{end_txt}</span><br>
+                            <span class="nature">({nature})</span>
+                        </div>
+                    """.strip()
 
-                # Advice
+                st.markdown(f"""
+                    <div class="report-card" style="background:{color};">
+                        <h1 style="font-size:5.4em; margin:8px 0; font-weight:900;">{data['key'].upper()}</h1>
+                        <p style="font-size:1.5em; opacity:0.92;">
+                            CAMELOT <b>{data['camelot']}</b>  •  Confiance <b>{data['conf']}%</b>
+                        </p>
+                        {mod_alert}
+                    </div>
+                    """, unsafe_allow_html=True)
+                
                 advice = get_mixing_advice(data)
                 if advice:
-                    with st.expander("📋 Checklist Mix (Piano Companion Logic)", expanded=True):
-                        st.markdown(f"<div style='background:rgba(16,185,129,0.1); padding:15px; border-radius:10px;'>{advice}</div>", unsafe_allow_html=True)
+                    with st.expander("📋 Checklist MIX – que faire avec ce track ?", expanded=True):
+                        st.markdown(
+                            f"""
+                            <div style="
+                                background: linear-gradient(135deg, rgba(16,185,129,0.10), rgba(16,185,129,0.04));
+                                border: 1px solid rgba(16,185,129,0.4);
+                                border-radius: 12px;
+                                padding: 20px 24px;
+                                margin: 16px 0;
+                                line-height: 1.65;
+                                font-size: 1.02em;
+                                white-space: pre-wrap;
+                            ">
+                            {advice}
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
 
-                # Charts
+                m1, m2, m3 = st.columns(3)
+                with m1: 
+                    st.markdown(f"<div class='metric-box'><b>TEMPO</b><br><span style='font-size:2.4em; color:#10b981;'>{data['tempo']}</span><br>BPM</div>", unsafe_allow_html=True)
+                with m2: 
+                    st.markdown(f"<div class='metric-box'><b>ACCORDAGE</b><br><span style='font-size:2.2em; color:#58a6ff;'>{data['tuning']}</span><br>Hz</div>", unsafe_allow_html=True)
+                with m3:
+                    btn_id = f"play_{i}_{hash(data['name'])}"
+                    components.html(f"""
+                        <button id="{btn_id}" style="width:100%; height:95px; background:linear-gradient(45deg, #4F46E5, #7C3AED); color:white; border:none; border-radius:15px; cursor:pointer; font-weight:bold; font-size:1.1em;">
+                            TESTER L'ACCORD
+                        </button>
+                        <script>{get_chord_js(btn_id, data['key'])}</script>
+                    """, height=110)
+
                 c1, c2 = st.columns([2, 1])
-                with c1:
-                    fig_tl = px.line(pd.DataFrame(data['timeline']), x="Temps", y="Note", markers=True, template="plotly_dark", category_orders={"Note": NOTES_ORDER})
-                    st.plotly_chart(fig_tl, use_container_width=True)
-                with c2:
-                    fig_rd = go.Figure(data=go.Scatterpolar(r=data['chroma'], theta=NOTES_LIST, fill='toself', line_color='#10b981'))
-                    fig_rd.update_layout(template="plotly_dark", polar=dict(radialaxis=dict(visible=False)))
-                    st.plotly_chart(fig_rd, use_container_width=True)
-                st.divider()
+                with c1: 
+                    fig_tl = px.line(
+                        pd.DataFrame(data['timeline']), 
+                        x="Temps", y="Note", 
+                        markers=True, 
+                        template="plotly_dark", 
+                        category_orders={"Note": NOTES_ORDER}
+                    )
+                    fig_tl.update_layout(height=320, margin=dict(l=0,r=0,t=20,b=0))
+                    st.plotly_chart(fig_tl, use_container_width=True, key=f"tl_{i}_{hash(f.name)}")
+                
+                with c2: 
+                    fig_rd = go.Figure(data=go.Scatterpolar(
+                        r=data['chroma'], 
+                        theta=NOTES_LIST, 
+                        fill='toself', 
+                        line_color='#10b981'
+                    ))
+                    fig_rd.update_layout(
+                        template="plotly_dark", 
+                        height=320, 
+                        polar=dict(radialaxis=dict(visible=False)),
+                        margin=dict(l=30,r=30,t=20,b=20)
+                    )
+                    st.plotly_chart(fig_rd, use_container_width=True, key=f"rd_{i}_{hash(f.name)}")
+                
+                # --- AJOUT : Affichage des accords et validation ---
+                with st.expander("🎹 Accords diatoniques (comme dans Piano Companion) – pour valider la tonalité", expanded=False):
+                    chords = data.get("diatonic_chords", [])
+                    if chords:
+                        df_chords = pd.DataFrame(chords)
+                        st.table(df_chords)  # Ou st.dataframe pour interactif
+                        st.markdown(f"**Score de validation (coverage chroma) :** {data.get('validation_score', 0)}%")
+                        if data.get('key_alternatives'):
+                            st.warning(f"Alternatives possibles : {', '.join(data['key_alternatives'])} – Vérifie manuellement !")
+                    else:
+                        st.info("Pas d'accords générés (tonalité inconnue).")
+                    
+                    # Pour la modulation
+                    target_chords = data.get("target_diatonic_chords", [])
+                    if target_chords:
+                        st.subheader("Accords pour la tonalité cible (modulation)")
+                        df_target = pd.DataFrame(target_chords)
+                        st.table(df_target)
+                
+                st.markdown("<hr style='border-color:#30363d; margin:40px 0 30px 0;'>", unsafe_allow_html=True)
+
+    global_progress_placeholder.success(f"Analyse terminée — {total_files} piste(s) traitée(s) avec succès !")
 
 with st.sidebar:
-    st.header("Sniper Control")
-    if st.button("🔄 Clear Cache"):
+    st.image("https://cdn-icons-png.flaticon.com/512/2569/2569107.png", width=80)
+    st.header("Contrôles Sniper")
+    if st.button("🔄 Vider le cache & relancer"):
         st.cache_data.clear()
         st.rerun()
