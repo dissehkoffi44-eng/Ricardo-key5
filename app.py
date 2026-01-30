@@ -172,7 +172,7 @@ def get_diatonic_chords(key):
     
     return chords
 
-def validate_key_with_chords(chroma_avg, diatonic_chords):
+def validate_key_with_chords(chroma_avg, diatonic_chords, key):
     """Valide la tonalité en vérifiant la coverage des notes des accords dans le chroma.
     Retourne un score de validation (0-100) et des alternatives si faible."""
     if not diatonic_chords:
@@ -195,7 +195,7 @@ def validate_key_with_chords(chroma_avg, diatonic_chords):
     # Si coverage faible (<70), suggère alternatives (ex. relative)
     alternatives = []
     if coverage < 70:
-        note, mode = final_key.split()  # Note: final_key doit être accessible, ajusté dans le contexte
+        note, mode = key.split()
         root_idx = NOTES_LIST.index(note)
         rel_idx = (root_idx - 3 if mode == 'major' else root_idx + 3) % 12
         rel_mode = 'minor' if mode == 'major' else 'major'
@@ -403,7 +403,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
 
     # --- AJOUT : Validation automatique avec influence sur la décision finale ---
     chroma_avg_array = np.array(chroma_avg)  # Convertir en array pour validation
-    validation_score, alternatives = validate_key_with_chords(chroma_avg_array, diatonic_chords)
+    validation_score, alternatives = validate_key_with_chords(chroma_avg_array, diatonic_chords, final_key)
 
     # Calculer les scores pour les alternatives et choisir la meilleure
     best_key = final_key
@@ -412,7 +412,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
 
     for alt_key in alternatives:
         alt_chords = get_diatonic_chords(alt_key)
-        alt_validation_score, _ = validate_key_with_chords(chroma_avg_array, alt_chords)
+        alt_validation_score, _ = validate_key_with_chords(chroma_avg_array, alt_chords, alt_key)
         # Combiner avec le score original (pondéré : 70% original conf, 30% validation)
         alt_combined = (final_conf * 0.7) + (alt_validation_score * 0.3)
         original_combined = (final_conf * 0.7) + (validation_score * 0.3)
