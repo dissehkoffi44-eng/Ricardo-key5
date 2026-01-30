@@ -1,6 +1,6 @@
 # RCDJ228 SNIPER M3 - VERSION FUSIONNÉE PRO (MOTEUR PIANO COMPANION)
 # LOGIQUE : Corrélation Bellman + Masques Théoriques Piano Companion + 7 Modes Grecs
-# FIX : Sécurité renforcée sur longueur de segment pour éviter ParameterError de chroma_cqt
+# FIX : try/except autour de chroma_cqt + garde-fou longueur minimale
 
 import streamlit as st
 import librosa
@@ -133,7 +133,7 @@ def solve_key_sniper(chroma_vector):
             stat_score = np.corrcoef(cv, np.roll(profile, i))[0, 1]
             key_name = f"{NOTES_LIST[i]} {mode}"
             theo_fit = get_theoretical_score(cv, key_name)
-            final_score = stat_score * (theo_fit ** 1.8) # Puissance théorique renforcée
+            final_score = stat_score * (theo_fit ** 1.8)
             
             if final_score > best_overall_score:
                 best_overall_score = final_score
@@ -155,7 +155,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
         else:
             with io.BytesIO(file_bytes) as buf: y, sr = librosa.load(buf, sr=22050, mono=True)
     except Exception as e:
-        st.error(f"Erreur: {e}"); return None
+        st.error(f"Erreur chargement audio: {e}"); return None
 
     duration = librosa.get_duration(y=y, sr=sr)
     tuning = librosa.estimate_tuning(y=y, sr=sr)
@@ -164,31 +164,40 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     step, timeline, votes = 6, [], Counter()
     segments = list(range(0, max(1, int(duration) - step), 3))
     
-    # Taille minimale renforcée pour chroma_cqt (évite ParameterError)
-    MIN_SAMPLES_CQT = 24576  # ≈ 1.11 secondes à 22050 Hz → très stable
+    MIN_SAMPLES_SAFE = 16384  # seuil bas pour éviter d'essayer sur des segments ridicules
 
     for idx, start in enumerate(segments):
         if _progress_callback: _progress_callback(int((idx/len(segments))*100), f"Scan {start}s / {int(duration)}s")
-        idx_s, idx_e = int(start * sr), int((start + step) * sr)
+        
+        idx_s = int(start * sr)
+        idx_e = min(idx_s + int(step * sr), len(y_filt))  # ne pas dépasser la fin du signal
         seg = y_filt[idx_s:idx_e]
         
-        # Sécurité renforcée : longueur + énergie minimale
-        if len(seg) < MIN_SAMPLES_CQT or np.max(np.abs(seg)) < 0.015:
+        if len(seg) < MIN_SAMPLES_SAFE or np.max(np.abs(seg)) < 0.015:
             continue
         
-        c_raw = librosa.feature.chroma_cqt(y=seg, sr=sr, tuning=tuning, n_chroma=24)
-        c_avg = np.mean((c_raw[::2, :] + c_raw[1::2, :]) / 2, axis=1)
+        try:
+            c_raw = librosa.feature.chroma_cqt(y=seg, sr=sr, tuning=tuning, n_chroma=24)
+            c_avg = np.mean((c_raw[::2, :] + c_raw[1::2, :]) / 2, axis=1)
+            
+            res = solve_key_sniper(c_avg)
+            weight = 2.0 if (start < 15 or start > (duration - 20)) else 1.0
+            votes[res['key']] += int(res['score'] * 100 * weight)
+            timeline.append({"Temps": start, "Note": res['key'], "Conf": res['score']})
         
-        res = solve_key_sniper(c_avg)
-        weight = 2.0 if (start < 15 or start > (duration - 20)) else 1.0
-        votes[res['key']] += int(res['score'] * 100 * weight)
-        timeline.append({"Temps": start, "Note": res['key'], "Conf": res['score']})
+        except librosa.util.exceptions.ParameterError:
+            # print(f"Skip segment {start:.1f}s → ParameterError (longueur={len(seg)})");  # décommenter pour debug
+            continue
+        except Exception as exc:
+            # print(f"Erreur inattendue segment {start:.1f}s : {exc}")
+            continue
 
-    if not votes: return None
+    if not votes:
+        return None
 
     most_common = votes.most_common(2)
     final_key = most_common[0][0]
-    final_conf = int(np.mean([t['Conf'] for t in timeline if t['Note'] == final_key]) * 100)
+    final_conf = int(np.mean([t['Conf'] for t in timeline if t['Note'] == final_key]) * 100) if timeline else 0
     
     mod_detected = len(most_common) > 1 and (votes[most_common[1][0]] / sum(votes.values())) > 0.22
     target_key = most_common[1][0] if mod_detected else None
@@ -198,13 +207,14 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
 
     res_obj = {
         "key": final_key, "camelot": CAMELOT_MAP.get(final_key, "??"),
-        "conf": min(final_conf, 99), "tempo": int(float(tempo)),
-        "tuning": round(440 * (2**(tuning/12)), 1), "timeline": timeline,
+        "conf": min(final_conf, 99), "tempo": int(float(tempo or 0)),
+        "tuning": round(440 * (2**(tuning/12)), 1) if tuning is not None else 440.0,
+        "timeline": timeline,
         "chroma": chroma_avg.tolist(), "modulation": mod_detected,
         "target_key": target_key, "target_camelot": CAMELOT_MAP.get(target_key, "??") if target_key else None,
-        "mod_target_percentage": round((sum(1 for t in timeline if t["Note"] == target_key)/len(timeline))*100, 1) if mod_detected else 0,
-        "mod_ends_in_target": (timeline[-1]["Note"] == target_key) if mod_detected else False,
-        "modulation_time_str": seconds_to_mmss(min([t["Temps"] for t in timeline if t["Note"] == target_key])) if mod_detected else None,
+        "mod_target_percentage": round((sum(1 for t in timeline if t["Note"] == target_key)/len(timeline))*100, 1) if mod_detected and timeline else 0,
+        "mod_ends_in_target": (timeline[-1]["Note"] == target_key) if mod_detected and timeline else False,
+        "modulation_time_str": seconds_to_mmss(min([t["Temps"] for t in timeline if t["Note"] == target_key])) if mod_detected and timeline else None,
         "name": file_name
     }
 
