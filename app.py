@@ -172,37 +172,41 @@ def get_diatonic_chords(key):
     
     return chords
 
-def validate_key_with_chords(chroma_avg, diatonic_chords, key):
-    """Valide la tonalité en vérifiant la coverage des notes des accords dans le chroma.
-    Retourne un score de validation (0-100) et des alternatives si faible."""
-    if not diatonic_chords:
-        return 0, []
+def get_diatonic_coverage(chroma_norm, key):
+    """Calcule la coverage diatonique pour une clé, avec bonus mode-specific."""
+    chords = get_diatonic_chords(key)
+    if not chords:
+        return 0
     
-    # Notes uniques de tous les accords diatoniques
+    # Notes uniques
     diatonic_notes = set()
-    for chord in diatonic_chords:
+    for chord in chords:
         diatonic_notes.update(chord['notes'].split())
     
-    # Indices des notes diatoniques
     diatonic_idxs = [NOTES_LIST.index(n) for n in diatonic_notes]
     
-    # Normalise chroma
-    chroma_norm = chroma_avg / np.max(chroma_avg)
+    # Coverage base
+    base_coverage = np.mean([chroma_norm[idx] for idx in diatonic_idxs])
     
-    # Coverage : moyenne des valeurs chroma pour les notes diatoniques
-    coverage = np.mean([chroma_norm[idx] for idx in diatonic_idxs]) * 100
+    # Bonus mode (tierce tonique)
+    note, mode = key.split()
+    root_idx = NOTES_LIST.index(note)
+    third_maj_idx = (root_idx + 4) % 12
+    third_min_idx = (root_idx + 3) % 12
+    mode_bonus = 0
+    if mode == 'major':
+        if chroma_norm[third_maj_idx] > chroma_norm[third_min_idx] + 0.1:
+            mode_bonus = 0.15
+        else:
+            mode_bonus = -0.15
+    else:
+        if chroma_norm[third_min_idx] > chroma_norm[third_maj_idx] + 0.1:
+            mode_bonus = 0.15
+        else:
+            mode_bonus = -0.15
     
-    # Si coverage faible (<70), suggère alternatives (ex. relative)
-    alternatives = []
-    if coverage < 70:
-        note, mode = key.split()
-        root_idx = NOTES_LIST.index(note)
-        rel_idx = (root_idx - 3 if mode == 'major' else root_idx + 3) % 12
-        rel_mode = 'minor' if mode == 'major' else 'major'
-        rel_key = f"{NOTES_LIST[rel_idx]} {rel_mode}"
-        alternatives.append(rel_key)
-    
-    return int(coverage), alternatives
+    coverage = base_coverage + mode_bonus
+    return max(0, min(1, coverage))  # Normalisé 0-1 pour scoring
 
 # --- STYLES CSS ---
 st.markdown("""
@@ -290,7 +294,11 @@ def solve_key_sniper(chroma_vector, bass_vector):
                 if cv[fifth_idx] > 0.5:
                     score += 0.10
                 
+                # --- AJOUT : Intégration des accords diatoniques dans le score ---
                 key_name = f"{NOTES_LIST[i]} {mode}"
+                diatonic_coverage = get_diatonic_coverage(cv, key_name)
+                score += diatonic_coverage * 0.2  # Poids 20% pour influence sans dominer
+                
                 key_scores[key_name].append(score)
     
     for key_name, scores in key_scores.items():
@@ -397,41 +405,26 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     chroma_avg = np.mean(librosa.feature.chroma_cqt(y=y_filt, sr=sr, tuning=tuning), axis=1)
 
-    # --- AJOUT : Génération des accords diatoniques ---
+    # --- AJOUT : Génération des accords diatoniques pour affichage ---
     diatonic_chords = get_diatonic_chords(final_key)
     target_diatonic_chords = get_diatonic_chords(target_key) if target_key else []
 
-    # --- AJOUT : Validation automatique avec influence sur la décision finale ---
-    chroma_avg_array = np.array(chroma_avg)  # Convertir en array pour validation
-    validation_score, alternatives = validate_key_with_chords(chroma_avg_array, diatonic_chords, final_key)
-
-    # Calculer les scores pour les alternatives et choisir la meilleure
-    best_key = final_key
-    best_validation_score = validation_score
-    best_conf = final_conf
-
-    for alt_key in alternatives:
-        alt_chords = get_diatonic_chords(alt_key)
-        alt_validation_score, _ = validate_key_with_chords(chroma_avg_array, alt_chords, alt_key)
-        # Combiner avec le score original (pondéré : 70% original conf, 30% validation)
-        alt_combined = (final_conf * 0.7) + (alt_validation_score * 0.3)
-        original_combined = (final_conf * 0.7) + (validation_score * 0.3)
-        if alt_combined > original_combined:
-            best_key = alt_key
-            best_validation_score = alt_validation_score
-            best_conf = int(alt_combined)  # Mise à jour de la confiance ajustée
-
-    # Mise à jour de final_key si une meilleure alternative est trouvée
-    final_key = best_key
-    final_conf = min(best_conf, 99)
-
-    # Mise à jour de Camelot pour la nouvelle clé si changée
-    camelot = CAMELOT_MAP.get(final_key, "??")
+    # --- Validation finale pour alternatives (optionnelle, pour affichage) ---
+    chroma_avg_array = np.array(chroma_avg)
+    validation_score = get_diatonic_coverage(chroma_avg_array / np.max(chroma_avg_array), final_key) * 100
+    alternatives = []
+    if validation_score < 75:
+        note, mode = final_key.split()
+        root_idx = NOTES_LIST.index(note)
+        rel_idx = (root_idx - 3 if mode == 'major' else root_idx + 3) % 12
+        rel_mode = 'minor' if mode == 'major' else 'major'
+        rel_key = f"{NOTES_LIST[rel_idx]} {rel_mode}"
+        alternatives.append(rel_key)
 
     res_obj = {
         "key": final_key,
-        "camelot": camelot,
-        "conf": final_conf,
+        "camelot": CAMELOT_MAP.get(final_key, "??"),
+        "conf": min(final_conf, 99),
         "tempo": int(float(tempo)),
         "tuning": round(440 * (2**(tuning/12)), 1),
         "timeline": timeline,
@@ -445,7 +438,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
         "name": file_name,
         "diatonic_chords": diatonic_chords,
         "target_diatonic_chords": target_diatonic_chords,
-        "validation_score": best_validation_score,
+        "validation_score": int(validation_score),
         "key_alternatives": alternatives
     }
 
