@@ -1,6 +1,6 @@
 # RCDJ228 SNIPER M3 - VERSION FUSIONNÉE PRO (MOTEUR PIANO COMPANION)
 # LOGIQUE : Corrélation Bellman + Masques Théoriques Piano Companion + 7 Modes Grecs
-# FIX : Sécurité sur longueur de segment pour éviter ParameterError
+# FIX : Sécurité renforcée sur longueur de segment pour éviter ParameterError de chroma_cqt
 
 import streamlit as st
 import librosa
@@ -164,13 +164,17 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     step, timeline, votes = 6, [], Counter()
     segments = list(range(0, max(1, int(duration) - step), 3))
     
+    # Taille minimale renforcée pour chroma_cqt (évite ParameterError)
+    MIN_SAMPLES_CQT = 24576  # ≈ 1.11 secondes à 22050 Hz → très stable
+
     for idx, start in enumerate(segments):
         if _progress_callback: _progress_callback(int((idx/len(segments))*100), f"Scan {start}s / {int(duration)}s")
         idx_s, idx_e = int(start * sr), int((start + step) * sr)
         seg = y_filt[idx_s:idx_e]
         
-        # FIX : Sécurité taille minimum pour Chroma CQT (8192 samples minimum conseillés)
-        if len(seg) < 8192 or np.max(np.abs(seg)) < 0.015: continue
+        # Sécurité renforcée : longueur + énergie minimale
+        if len(seg) < MIN_SAMPLES_CQT or np.max(np.abs(seg)) < 0.015:
+            continue
         
         c_raw = librosa.feature.chroma_cqt(y=seg, sr=sr, tuning=tuning, n_chroma=24)
         c_avg = np.mean((c_raw[::2, :] + c_raw[1::2, :]) / 2, axis=1)
