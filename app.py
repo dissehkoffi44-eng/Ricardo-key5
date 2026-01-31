@@ -33,15 +33,13 @@ CHAT_ID = st.secrets.get("CHAT_ID")
 
 # --- RÉFÉRENTIELS HARMONIQUES ---
 NOTES_LIST = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-MODES = ['major', 'minor', 'mixolydian', 'dorian', 'phrygian', 'lydian', 'locrian', 'aeolian', 'ionian']  # Ajout des modes étendus
-NOTES_ORDER = [f"{n} {m}" for n in NOTES_LIST for m in MODES]
+NOTES_ORDER = [f"{n} {m}" for n in NOTES_LIST for m in ['major', 'minor']]
 
 CAMELOT_MAP = {
     'C major': '8B', 'C# major': '3B', 'D major': '10B', 'D# major': '5B', 'E major': '12B', 'F major': '7B',
     'F# major': '2B', 'G major': '9B', 'G# major': '4B', 'A major': '11B', 'A# major': '6B', 'B major': '1B',
     'C minor': '5A', 'C# minor': '12A', 'D minor': '7A', 'D# minor': '2A', 'E minor': '9A', 'F minor': '4A',
     'F# minor': '11A', 'G minor': '6A', 'G# minor': '1A', 'A minor': '8A', 'A# minor': '3A', 'B minor': '10A'
-    # Note: Pour modes étendus, pas de Camelot standard ; on peut mapper à maj/min équivalents si besoin
 }
 
 PROFILES = {
@@ -57,7 +55,6 @@ PROFILES = {
         "major": [16.8, 0.86, 12.95, 1.41, 13.49, 11.93, 1.25, 16.74, 1.56, 12.81, 1.89, 12.44],
         "minor": [18.16, 0.69, 12.99, 13.34, 1.07, 11.15, 1.38, 17.2, 13.62, 1.27, 12.79, 2.4]
     }
-    # Note: Pour modes étendus, pas de profils standards ; on peut étendre si besoin, mais pour l'instant fallback à maj/min
 }
 
 # --- FONCTIONS UTILITAIRES POUR LES CONSEILS MIX ---
@@ -132,42 +129,22 @@ def get_mixing_advice(data):
 
 # --- AJOUTS POUR PIANO COMPANION INTÉGRATION ---
 
-def get_mode_intervals(mode):
-    """Retourne les intervalles pour un mode donné."""
-    if mode in ['major', 'ionian']:
-        return [0, 2, 4, 5, 7, 9, 11]
-    elif mode == 'minor' or mode == 'aeolian':
-        return [0, 2, 3, 5, 7, 8, 10]
-    elif mode == 'mixolydian':
-        return [0, 2, 4, 5, 7, 9, 10]
-    elif mode == 'dorian':
-        return [0, 2, 3, 5, 7, 9, 10]
-    elif mode == 'phrygian':
-        return [0, 1, 3, 5, 7, 8, 10]
-    elif mode == 'lydian':
-        return [0, 2, 4, 6, 7, 9, 11]
-    elif mode == 'locrian':
-        return [0, 1, 3, 5, 6, 8, 10]
-    else:
-        return []  # Mode inconnu
-
 def get_diatonic_chords(key):
-    """Génère les accords diatoniques pour une tonalité/mode, comme dans Piano Companion."""
+    """Génère les accords diatoniques pour une tonalité, comme dans Piano Companion."""
     if not key or key == "Unknown":
         return []
     
     note, mode = key.split()
     root_idx = NOTES_LIST.index(note)
     
-    scale_intervals = get_mode_intervals(mode)
-    if not scale_intervals:
-        return []
-    
-    # Types d'accords diatoniques approximatifs pour modes (basés sur tierce/quinte)
-    chord_types = ['maj', 'min', 'min', 'maj', 'maj', 'min', 'dim']  # Défaut maj ; adapter si besoin pour modes
-    if mode in ['minor', 'aeolian', 'dorian', 'phrygian']:
+    if mode == 'major':
+        scale_intervals = [0, 2, 4, 5, 7, 9, 11]  # Gamme majeure
+        chord_types = ['maj', 'min', 'min', 'maj', 'maj', 'min', 'dim']
+        roman_numerals = ['I', 'ii', 'iii', 'IV', 'V', 'vi', 'vii°']
+    else:  # minor (naturelle pour simplicité, comme base dans l'app)
+        scale_intervals = [0, 2, 3, 5, 7, 8, 10]  # Gamme mineure naturelle
         chord_types = ['min', 'dim', 'maj', 'min', 'min', 'maj', 'maj']
-    roman_numerals = ['I', 'ii', 'iii', 'IV', 'V', 'vi', 'vii°'] if 'major' in mode else ['i', 'ii°', 'III', 'iv', 'v', 'VI', 'VII']
+        roman_numerals = ['i', 'ii°', 'III', 'iv', 'v', 'VI', 'VII']
     
     scale_notes = [NOTES_LIST[(root_idx + interv) % 12] for interv in scale_intervals]
     
@@ -191,13 +168,13 @@ def get_diatonic_chords(key):
             'roman': roman_numerals[i],
             'name': f"{chord_root}{ctype}",
             'notes': ' '.join(chord_notes),
-            'notes_list': chord_notes  # Ajout pour test consonance
+            'notes_list': chord_notes
         })
     
     return chords
 
 def get_diatonic_notes(key):
-    """Retourne les notes uniques diatoniques d'une tonalité/mode (pour comparaison)."""
+    """Retourne les notes uniques diatoniques d'une tonalité (pour comparaison)."""
     chords = get_diatonic_chords(key)
     if not chords:
         return set()
@@ -205,6 +182,12 @@ def get_diatonic_notes(key):
     for chord in chords:
         diat_notes.update(chord['notes'].split())
     return diat_notes
+
+def test_chord_consonance(chroma_norm, chord_notes_list):
+    """Teste la consonance d'un accord en sommant les valeurs chroma normalisées de ses notes."""
+    indices = [NOTES_LIST.index(note) for note in chord_notes_list]
+    consonance_score = np.sum([chroma_norm[idx] for idx in indices]) / len(indices)  # Moyenne pour normalisation
+    return consonance_score
 
 # --- STYLES CSS ---
 st.markdown("""
@@ -262,18 +245,17 @@ def solve_key_sniper(chroma_vector, bass_vector):
     cv = (chroma_vector - chroma_vector.min()) / (chroma_vector.max() - chroma_vector.min() + 1e-6)
     bv = (bass_vector - bass_vector.min()) / (bass_vector.max() - bass_vector.min() + 1e-6)
     
-    key_scores = {f"{NOTES_LIST[i]} {mode}": [] for mode in MODES for i in range(12)}  # Extension aux modes
+    key_scores = {f"{NOTES_LIST[i]} {mode}": [] for mode in ["major", "minor"] for i in range(12)}
     
     for p_name, p_data in PROFILES.items():
-        for mode in MODES:
-            profile_mode = "major" if mode in ['major', 'ionian', 'mixolydian', 'lydian'] else "minor"  # Fallback à profils existants
+        for mode in ["major", "minor"]:
             for i in range(12):
-                score = np.corrcoef(cv, np.roll(p_data[profile_mode], i))[0, 1]
+                score = np.corrcoef(cv, np.roll(p_data[mode], i))[0, 1]
                 
                 dom_idx = (i + 7) % 12
                 leading_tone = (i + 11) % 12
                 
-                if 'minor' in mode or mode in ['aeolian', 'dorian', 'phrygian', 'locrian']:
+                if mode == "minor":
                     if cv[leading_tone] > 0.30:
                         score *= 1.35
                     if cv[dom_idx] > 0.45:
@@ -285,7 +267,7 @@ def solve_key_sniper(chroma_vector, bass_vector):
                 if bv[i] > 0.6:
                     score += (bv[i] * 0.25)
                 
-                third_idx = (i + 4) % 12 if 'major' in mode else (i + 3) % 12
+                third_idx = (i + 4) % 12 if mode == "major" else (i + 3) % 12
                 if cv[third_idx] > 0.5:
                     score += 0.15
                 
@@ -311,12 +293,6 @@ def seconds_to_mmss(seconds):
     mins = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{mins:02d}:{secs:02d}"
-
-def test_chord_consonance(chroma_norm, chord_notes_list):
-    """Teste la consonance d'un accord en sommant les valeurs chroma normalisées de ses notes."""
-    indices = [NOTES_LIST.index(note) for note in chord_notes_list]
-    consonance_score = np.sum([chroma_norm[idx] for idx in indices]) / len(indices)  # Moyenne pour normalisation
-    return consonance_score
 
 def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     ext = file_name.split('.')[-1].lower()
@@ -369,8 +345,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     if not votes:
         return None
 
-    most_common = votes.most_common(3)  # Top 3 pour candidats (plus que 2 pour comparaison)
-
+    most_common = votes.most_common(2)
     final_key = most_common[0][0]
     final_conf = int(np.mean([t['Conf'] for t in timeline if t['Note'] == final_key]) * 100)
     
@@ -412,7 +387,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     top_indices = np.argsort(chroma_norm)[-5:]  # Top 5 notes
     top_notes = set(NOTES_LIST[i] for i in top_indices)
 
-    # Candidats : Top 3 des votes
+    # Candidats : Top 2 des votes (fidèle à l'original)
     candidates = [mc[0] for mc in most_common]
 
     # Score match : Proportion de top notes dans diatoniques (pondéré 0.3 sur conf)
@@ -423,7 +398,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
         # Bonus si tierce match mode
         note, mode = key.split()
         root_idx = NOTES_LIST.index(note)
-        third_idx = (root_idx + 4 if 'major' in mode or mode in ['ionian', 'mixolydian', 'lydian'] else root_idx + 3) % 12
+        third_idx = (root_idx + 4 if mode == 'major' else root_idx + 3) % 12
         if NOTES_LIST[third_idx] in top_notes:
             match_count += 0.2  # Bonus tierce
         matches[key] = match_count
@@ -434,17 +409,17 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     final_conf = int(final_conf * (0.7 + 0.3 * best_match))  # Ajuste conf
     final_key = best_key  # Switch si meilleur match
 
-    # --- AJOUT : Test de consonance sur tous les accords possibles ---
+    # --- AJOUT : Test de consonance sur les accords diatoniques ---
     diatonic_chords = get_diatonic_chords(final_key)
     consonance_scores = {}
     for chord in diatonic_chords:
         score = test_chord_consonance(chroma_norm, chord['notes_list'])
-        consonance_scores[chord['name']] = score
+        consonance_scores[chord['name']] = round(score * 100, 1)  # Pour % avec 1 décimale
 
     # Meilleur accord (celui avec le score le plus haut)
     if consonance_scores:
         best_chord_name = max(consonance_scores, key=consonance_scores.get)
-        best_chord_score = consonance_scores[best_chord_name] * 100  # Pour %
+        best_chord_score = consonance_scores[best_chord_name]
     else:
         best_chord_name = "None"
         best_chord_score = 0
@@ -477,16 +452,16 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     overall_consonance_scores = {}
     for chord in all_chords:
         score = test_chord_consonance(chroma_norm, chord['notes_list'])
-        overall_consonance_scores[chord['name']] = score
+        overall_consonance_scores[chord['name']] = round(score * 100, 1)
 
     # Identifier les chords à exclure (root de main et target)
     exclude_chords = set()
     note, mode = final_key.split()
-    root_chord = f"{note}maj" if 'major' in mode or mode in ['ionian', 'mixolydian', 'lydian'] else f"{note}min"
+    root_chord = f"{note}maj" if mode == 'major' else f"{note}min"
     exclude_chords.add(root_chord)
     if target_key:
         t_note, t_mode = target_key.split()
-        target_root_chord = f"{t_note}maj" if 'major' in t_mode or t_mode in ['ionian', 'mixolydian', 'lydian'] else f"{t_note}min"
+        target_root_chord = f"{t_note}maj" if t_mode == 'major' else f"{t_note}min"
         exclude_chords.add(target_root_chord)
 
     # Trier et trouver le meilleur non exclu
@@ -496,7 +471,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
     for ch, sc in sorted_chords:
         if ch not in exclude_chords:
             best_global_chord = ch
-            best_global_score = sc * 100
+            best_global_score = sc
             break
 
     if not best_global_chord:
@@ -512,7 +487,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
 
     res_obj = {
         "key": final_key,
-        "camelot": CAMELOT_MAP.get(final_key.split()[0] + ' ' + ('major' if 'major' in final_key else 'minor'), "??"),  # Mapper modes à maj/min pour Camelot
+        "camelot": CAMELOT_MAP.get(final_key, "??"),
         "conf": min(final_conf, 99),
         "tempo": int(float(tempo)),
         "tuning": round(440 * (2**(tuning/12)), 1),
@@ -520,7 +495,7 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
         "chroma": chroma_avg.tolist(),
         "modulation": mod_detected,
         "target_key": target_key,
-        "target_camelot": CAMELOT_MAP.get(target_key.split()[0] + ' ' + ('major' if 'major' in target_key else 'minor'), "??") if target_key else None,
+        "target_camelot": CAMELOT_MAP.get(target_key, "??") if target_key else None,
         "modulation_time_str": seconds_to_mmss(modulation_time) if mod_detected else None,
         "mod_target_percentage": round(target_percentage, 1) if mod_detected else 0,
         "mod_ends_in_target": ends_in_target if mod_detected else False,
@@ -532,7 +507,9 @@ def process_audio_precision(file_bytes, file_name, _progress_callback=None):
         "best_chord": best_chord_name,  # Best diatonic
         "best_chord_consonance": int(best_chord_score),
         "best_global_chord": best_global_chord,  # Best global excluant roots
-        "best_global_consonance": int(best_global_score)
+        "best_global_consonance": int(best_global_score),
+        "consonance_scores": consonance_scores,
+        "overall_consonance_scores": overall_consonance_scores
     }
 
     if TELEGRAM_TOKEN and CHAT_ID:
@@ -770,7 +747,7 @@ if uploaded_files:
                     chords = data.get("diatonic_chords", [])
                     if chords:
                         df_chords = pd.DataFrame(chords)
-                        st.table(df_chords)  # Ou st.dataframe pour interactif
+                        st.table(df_chords)  # Premier tableau : accords diatoniques
                         st.markdown(f"**Score de validation (coverage chroma) :** {data.get('validation_score', 0)}%")
                         if data.get('key_alternatives'):
                             st.warning(f"Alternatives possibles : {', '.join(data['key_alternatives'])} – Vérifie manuellement !")
@@ -783,6 +760,13 @@ if uploaded_files:
                         st.subheader("Accords pour la tonalité cible (modulation)")
                         df_target = pd.DataFrame(target_chords)
                         st.table(df_target)
+                    
+                    # Deuxième tableau : scores de consonance pour les accords diatoniques
+                    if consonance_scores:
+                        st.subheader("Scores de consonance des accords diatoniques")
+                        consonance_data = [{'Accord': name, 'Score (%)': score} for name, score in sorted(consonance_scores.items(), key=lambda x: x[1], reverse=True)]
+                        df_consonance = pd.DataFrame(consonance_data)
+                        st.table(df_consonance)
                     
                     # Affichage du meilleur accord
                     st.markdown(f"**Meilleur accord consonant :** {data.get('best_chord', 'None')} (Score: {data.get('best_chord_consonance', 0)}%)")
