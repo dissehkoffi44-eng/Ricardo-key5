@@ -761,7 +761,8 @@ if uploaded_files:
                         df_target = pd.DataFrame(target_chords)
                         st.table(df_target)
                     
-                    # Deuxième tableau : scores de consonance pour les accords diatoniques
+                    consonance_scores = data.get("consonance_scores", {})
+                    # Deuxième tableau : scores de consonance des accords diatoniques
                     if consonance_scores:
                         st.subheader("Scores de consonance des accords diatoniques")
                         consonance_data = [{'Accord': name, 'Score (%)': score} for name, score in sorted(consonance_scores.items(), key=lambda x: x[1], reverse=True)]
